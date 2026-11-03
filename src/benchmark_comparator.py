@@ -72,13 +72,14 @@ class PCIeTransitComparator:
     def print_comparison_card(self, results: Dict[str, Any]):
         tokens = results["num_tokens"]
         print("=" * 82)
-        print(f" BeyondVRAM: Analytical PCIe Bus Traffic Model ({tokens:,} Decode Tokens)")
+        print(f" BeyondVRAM: Analytical PCIe Traffic Model ({tokens:,} Decode Tokens)
+ NOTE: 'Hypothetical stream' is an upper bound, NOT stock llama.cpp behaviour (stock runs CPU layers in place).")
         print("=" * 82)
         print(f" Measured PCIe H2D Bandwidth : {self.pcie_bandwidth_gibps} GiB/s (pinned host -> RTX 3050)")
         print(f" Single-Token Expert Lookups : {results['total_expert_calls']:,} ({self.num_layers} layers x Top-{self.top_k})")
-        print(f" Measured SLRU Hit Rate      : {results['cache_hit_rate_pct']}% resident in GDDR6")
+        print(f" SLRU Hit Rate (from logs)   : {results['cache_hit_rate_pct']}% resident in GDDR6")
         print("-" * 82)
-        print(f" {'METRIC':<30} | {'UNCACHED STREAM':<16} | {'SLRU CACHE (89%)':<16} | {'CPU COLD PATH'}")
+        print(f" {'METRIC':<30} | {'HYPOTHETICAL STREAM':<19} | {'SLRU CACHE (89%)':<16} | {'CPU COLD PATH'}")
         print("-" * 82)
         print(
             f" {'PCIe Data Transferred':<30} | {results['uncached_stream_gib']:>10.2f} GiB   | "
