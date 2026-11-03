@@ -51,7 +51,7 @@ To keep claims verifiable and transparent, the repository separates end-to-end r
 | :--- | :--- |
 | **GPU** | NVIDIA GeForce RTX 3050 6GB Laptop GPU (`6,143 MiB` GDDR6, Compute Capability `8.6`, PCIe 4.0) |
 | **CPU** | Intel Core 5 210H (`8` physical cores / `12` threads, AVX2 + FMA, OpenMP) |
-| **System RAM** | 16 GB DDR4 |
+| **System RAM** | 16 GB DDR4(Single channel) |
 | **OS & Toolchains** | Windows 11 (WDDM 3.x), CUDA Toolkit 13.2 (`nvcc`), MSVC 19.44 (`cl.exe`), Nsight Systems `2025.6.3` |
 | **Inference Engine** | `llama.cpp` build `b1-ac8e169` (`CUDA0`) |
 | **Target Model** | `Groot-19B-A3B-261023.i1-Q3_K_S.gguf` (`7.82 GiB`, `qwen35moe`, `41` MoE layers, `128` experts/layer, `Top-8` routing) |
