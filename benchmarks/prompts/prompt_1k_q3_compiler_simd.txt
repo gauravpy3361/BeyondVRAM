@@ -1,0 +1,20 @@
+You are a Distinguished Compiler Engineer and High-Performance Deep Learning Microkernel Architect specializing in low-level GPU code generation, polyhedral loop optimization, LLVM IR transformations, and hand-tuned CUDA/PTX microkernels for modern neural network accelerators.
+
+Please provide an exhaustive, authoritative, deeply technical engineering treatise detailing the compilation, mathematical formulation, memory tiling, and microarchitectural assembly optimization of a unified, high-performance fused attention and low-bit quantized Mixture-of-Experts (MoE) kernel.
+
+In your treatise, thoroughly address each of the following low-level optimization domains:
+
+1. Compiler Intermediate Representations (IR) & Lowering Pipelines:
+- Polyhedral Loop Optimization & MLIR Dialects: Trace the lowering path of a multi-head sparse MoE Transformer block from high-level PyTorch / FX Graph down to MLIR (Multi-Level Intermediate Representation). Detail the transformations across the Torch dialect, LinAlg (Linear Algebra) dialect, Affine dialect, GPU dialect, and finally LLVM IR / NVVM.
+- Fusion Passes & Memory Traffic Elimination: Formulate the mathematical graph-rewriting rules that detect and fuse memory-bound elementwise operations (RoPE rotary embedding application, RMSNorm, SwiGLU gating activation, and dequantization scaling) directly into the producer and consumer GEMM/GEMV loops. Quantify the exact global memory read/write traffic eliminated by this fusion using Williams' Roofline Model.
+
+2. Fused FlashAttention Forward Pass Microarchitecture:
+- Mathematical Derivation of Online Softmax: Rigorously derive the online softmax normalization algorithm (Milakov & Gimelshein / Welford technique) that computes attention across sequence blocks without materializing the intermediate $N 	imes N$ attention matrix. Formulate the running maximum $m_i$ and running sum $l_i$ recurrence relations, detailing the dynamic rescaling of intermediate accumulated values $P_{ij} V_j$.
+- Shared Memory Tiling & Bank Conflict Elimination: Design the exact 2D tile layout ($B_r 	imes d$ and $B_c 	imes d$) inside GPU shared memory (SRAM) for Ampere / Hopper architectures (Tensor Cores). Show how shared memory pad offsets and swizzled address bit layouts prevent 32-way shared memory bank conflicts during warp-synchronous cooperative loading.
+- Asynchronous Data Movement & Pipeline Stages: Formulate the use of CUDA 11/12 asynchronous copy instructions (`cp.async` on Ampere, TMA / Tensor Memory Accelerator on Hopper) to double-buffer and triple-buffer global-to-shared memory transfers, achieving 100% overlap between arithmetic Tensor Core execution (`mma.sync` / `wgmma`) and global memory latency.
+
+3. High-Performance Quantized MoE GEMV / GEMM Microkernels:
+- Low-Bit Quantization Packing & Unpacking: Formulate the microarchitectural mechanics of on-the-fly dequantization for uniform 4-bit (INT4 / Q4_0 / Q4_K) and 8-bit floating-point (FP8 E4M3 / E5M2) weight representations. Detail how SIMD shift, bitwise AND masks, and fast integer-to-float conversions are scheduled inside GPU warp registers to prevent register pressure spilling to local DRAM memory.
+- Asymmetric Zero-Transfer & SIMD CPU Dispatch: Contrast the GPU warp execution path with host CPU SIMD implementations (AVX-512 / AVX2 with FMA). Detail how unrolled inner product loops, memory prefetch intrinsics (`_mm_prefetch`), and cache-line alignment ensure that single-shot cold expert FFN computations execute at host DDR memory bus saturation without stalling CPU cores.
+
+Incorporate rigorous mathematical formulations, hardware register allocation trade-offs, and concrete assembly/CUDA pseudocode snippets throughout your treatise.
