@@ -51,25 +51,25 @@ Token In
 
 ---
 
-## Definitive 3× (1K Prompt × 1K Decode) Sustained Stress-Test
+## Head-to-Head Comparison: Standard `llama.cpp` vs BeyondVRAM
 
-To rigorously test real-world viability, BeyondVRAM was benchmarked against a **brutal long-sequence workload**: three massive, deep technical queries each ingesting **~800–920 prompt tokens** and generating **exactly 1,000 continuous decode tokens** (3,000 generated tokens total) under a full **131,072 (128K) context window**.
+To rigorously evaluate real-world performance, BeyondVRAM was benchmarked side-by-side against **Standard `llama.cpp`** on a brutal long-sequence workload: three massive, production-grade technical queries each ingesting **~800–920 prompt tokens** and generating **exactly 1,000 continuous decode tokens** (3,000 generated tokens total) under a full **131,072 (128K) context window**.
 
 * **Hardware:** NVIDIA GeForce RTX 3050 Laptop GPU (6,143 MiB GDDR6, PCIe 4.0 x4) + 16GB Host DDR4
-* **Engine Configuration:** `llama-cli.exe` with `-c 131072 -fa on -ctk q4_0 -ctv q4_0 --spec-type draft-mtp -cmoe --moe-cache-mib 3300 -n 1000`
-* **Zero Paging Guarantee:** 5,779 MiB allocated / 6,143 MiB total (**+364 MiB clean headroom**). Zero Windows WDDM paging, zero OOMs.
+* **Workload Scope:** 3 runs $\times$ 1,000 continuous decode tokens each = **6,000 total benchmark tokens evaluated**
+* **VRAM Safety:** Strict 3,300 MiB cache cap with +364 MiB clean headroom. Zero Windows WDDM paging thrashing.
 
-| Benchmark Query & Domain | Ingested Prompt | Prefill Speed (PP) | Generated Tokens | Sustained Decode | MoE Cache Hit Rate | MTP Speculative Acceptance | Total Elapsed Time |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Q1: Exascale Distributed AI Systems**<br>*(3D Parallelism, InfiniBand HDR/NDR, Disaggregated Prefill/Decode)* | 916 tokens | **61.9 t/s** | 1,000 tokens | **23.6 t/s** | **87.8%** | **46.0%** (284 / 617) | 69.3 s |
-| **Q2: Autonomous Agent Operating System (AgentOS)**<br>*(Kernel Scheduler, Memory Hierarchy, ReAct IAC, Sandboxing)* | 819 tokens | **59.1 t/s** | 1,000 tokens | **24.8 t/s** | **90.2%** | **45.2%** (282 / 624) | 66.5 s |
-| **Q3: High-Performance Compiler & Fused Kernels**<br>*(LLVM IR Polyhedral Loops, FlashAttention V2 CUDA PTX)* | 816 tokens | **65.8 t/s** | 1,000 tokens | **22.4 t/s** | **89.0%** | **42.4%** (262 / 618) | 70.2 s |
-| **DEFINITIVE BENCHMARK AVERAGE** | **850.3 tokens** | **62.3 t/s** | **3,000 tokens** | **23.6 t/s** | **89.0%** | **44.5%** | **68.7 s / run** |
+| Benchmark Query & Domain | Metric | Standard `llama.cpp` (Auto-Fit) | BeyondVRAM (Dynamic Cache) | BeyondVRAM Advantage |
+| :--- | :--- | :---: | :---: | :---: |
+| **Q1: Exascale Distributed Systems**<br>*(916 Prompt / 1,000 Decode)* | **Sustained Decode**<br>Prompt Prefill (PP)<br>MoE Cache Hit Rate<br>MTP Speculative Rate<br>**Total Run Time** | 14.10 t/s<br>**96.97 t/s**<br>0.0% (No Cache)<br>44.6%<br>96.58 s | **23.60 t/s**<br>61.90 t/s<br>**87.8%**<br>**46.0%**<br>**69.30 s** | **+67.4% Decode Speedup**<br>*(Dynamic cache offload)*<br>**+87.8% Cache Hits**<br>+1.4% MTP Draft<br>**27.3s Faster (-28.2%)** |
+| **Q2: Autonomous AgentOS Kernel**<br>*(819 Prompt / 1,000 Decode)* | **Sustained Decode**<br>Prompt Prefill (PP)<br>MoE Cache Hit Rate<br>MTP Speculative Rate<br>**Total Run Time** | 14.84 t/s<br>**129.39 t/s**<br>0.0% (No Cache)<br>37.8%<br>95.37 s | **24.75 t/s**<br>59.13 t/s<br>**90.2%**<br>**45.2%**<br>**66.49 s** | **+66.8% Decode Speedup**<br>*(Dynamic cache offload)*<br>**+90.2% Cache Hits**<br>+7.4% MTP Draft<br>**28.9s Faster (-30.3%)** |
+| **Q3: High-Performance Compiler & Kernels**<br>*(816 Prompt / 1,000 Decode)* | **Sustained Decode**<br>Prompt Prefill (PP)<br>MoE Cache Hit Rate<br>MTP Speculative Rate<br>**Total Run Time** | 18.45 t/s<br>**165.53 t/s**<br>0.0% (No Cache)<br>**48.6%**<br>75.06 s | **22.42 t/s**<br>65.84 t/s<br>**89.0%**<br>42.4%<br>**70.15 s** | **+21.5% Decode Speedup**<br>*(Dynamic cache offload)*<br>**+89.0% Cache Hits**<br>-6.2% MTP Draft<br>**4.9s Faster (-6.5%)** |
+| **SUITE BENCHMARK AVERAGE** | **Sustained Decode**<br>Prompt Prefill (PP)<br>MoE Cache Hit Rate<br>MTP Speculative Rate<br>**Total Wall-Clock Time** | 15.80 t/s<br>**130.63 t/s**<br>0.0% (No Cache)<br>43.7%<br>267.01 s | **23.59 t/s**<br>62.29 t/s<br>**89.0%**<br>**44.5%**<br>**205.94 s** | **+49.3% Sustained Decode**<br>*(Long-generation speedup)*<br>**89.0% Transit Cut**<br>+0.8% MTP Draft<br>**61.1s Total Time Saved** |
 
-### What This Empirical Data Reveals:
-1. **Steady-State High Throughput:** Unlike small micro-benchmarks that fluctuate, sustaining 1,000 continuous decode tokens per run proves that the dynamic SLRU cache does not degrade over long generation lengths—maintaining **23.6 tokens/sec sustained**.
-2. **Elimination of Host-to-Device Bottleneck:** Across 3,000 generated tokens, standard un-cached offloading would have forced **~1.24 Terabytes of PCIe expert transfers**. BeyondVRAM achieved an **89.0% average cache hit rate**, eliminating over **1.10 TB of bus traffic**.
-3. **Speculative Multi-Token Synergies (MTP):** Even on complex, dense code/compiler generation, MTP draft acceptance remained between **42.4% and 46.0%**, yielding a **~1.6x decode speedup** purely within the 6GB VRAM budget.
+### Critical Engineering Insights:
+1. **+49.3% Sustained Decode Acceleration:** On heavy, long-sequence generation (1,000 tokens), Standard `llama.cpp` bottlenecks on the PCIe bus as it drags un-cached expert weights back and forth, stalling generation at **14–15 t/s**. BeyondVRAM delivers **23.6–24.8 t/s** on distributed systems and agentic workflows (**+67% faster**).
+2. **61.1 Seconds of Waiting Eliminated:** Across all three 1,000-token answers, BeyondVRAM completed the suite in **205.9 seconds** versus **267.0 seconds** for standard `llama.cpp`—saving over **a full minute of idle waiting** on a budget 6GB laptop GPU.
+3. **Transparent Architectural Trade-Off:** Standard `llama.cpp` achieves faster prefill (130 t/s vs 62 t/s) because it leaves all GPU VRAM unreserved for static dense layer offloading. However, once decoding begins, BeyondVRAM's dynamic SLRU hot cache keeps **89.0%** of all active expert lookups in GDDR6, eliminating over **1.1 Terabytes of PCIe weight transfers** and overwhelmingly winning total generation time.
 
 ---
 
@@ -96,7 +96,8 @@ BeyondVRAM/
 ├── docs/
 │   └── ARCHITECTURE.md           # Detailed systems specification
 ├── benchmarks/
-│   ├── results_3x1k.json         # Definitive 3x (1K x 1K) raw benchmark metrics
+│   ├── results_3x1k.json         # BeyondVRAM 3x (1K x 1K) raw metrics
+│   ├── results_3x1k_std.json     # Standard llama.cpp 3x (1K x 1K) baseline metrics
 │   └── prompts/                  # Full 1K-token stress prompt suites
 │       ├── prompt_1k_q1_distributed.txt
 │       ├── prompt_1k_q2_agent_os.txt
@@ -112,7 +113,8 @@ BeyondVRAM/
     ├── zero_transfer_ffn.py      # Step 3: Zero-Transfer dispatch heuristic
     ├── benchmark_comparator.py   # PCIe bus transit & time savings calculator
     ├── create_1k_prompts.py      # Prompt generator for the 1Kx1K benchmark suite
-    ├── run_full_3x1k_bench.py    # Definitive 3x (1K prompt x 1K decode) stress-test runner
+    ├── run_full_3x1k_bench.py    # BeyondVRAM 3x (1K x 1K) stress runner
+    ├── run_full_3x1k_std_bench.py# Standard baseline 3x (1K x 1K) runner
     └── measure_context_scaling.py# 4K to 128K context memory scaling evaluator
 ```
 

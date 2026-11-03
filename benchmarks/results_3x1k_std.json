@@ -1,0 +1,38 @@
+{
+  "results": [
+    {
+      "id": "Q1",
+      "title": "Exascale Distributed AI Systems",
+      "pp_tokens": 916,
+      "pp_speed": 96.97,
+      "tg_tokens": 1000,
+      "tg_speed": 14.1,
+      "draft_rate": 44.574999999999996,
+      "elapsed": 96.58087205886841
+    },
+    {
+      "id": "Q2",
+      "title": "Autonomous Agent Operating System",
+      "pp_tokens": 819,
+      "pp_speed": 129.39,
+      "tg_tokens": 1000,
+      "tg_speed": 14.84,
+      "draft_rate": 37.846999999999994,
+      "elapsed": 95.36528706550598
+    },
+    {
+      "id": "Q3",
+      "title": "High-Performance Compiler & Kernels",
+      "pp_tokens": 816,
+      "pp_speed": 165.53,
+      "tg_tokens": 1000,
+      "tg_speed": 18.45,
+      "draft_rate": 48.644,
+      "elapsed": 75.05589556694031
+    }
+  ],
+  "summary": {
+    "avg_pp": 130.63,
+    "avg_tg": 15.796666666666667
+  }
+}
