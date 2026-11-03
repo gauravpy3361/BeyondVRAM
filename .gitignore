@@ -1,0 +1,37 @@
+# Model weights (Never commit multi-GB files to Git)
+*.gguf
+*.bin
+*.safetensors
+*.pt
+*.onnx
+
+# Build and compiled binaries
+*.exe
+*.obj
+*.o
+*.dll
+*.so
+*.dylib
+build/
+bin/
+dist/
+
+# Python environment & cache
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+
+# Logs and benchmarks
+*.log
+*.tmp
+logs/
+benchmark_results/
+
+# OS and IDE files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
