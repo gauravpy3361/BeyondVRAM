@@ -51,18 +51,16 @@ Token In
 
 ---
 
-## Live Benchmark Validation
+## 3-Question Deep Stress-Test (500+ Token Prompts, 400 Token Answers)
 
-Evaluated on **NVIDIA GeForce RTX 3050 6GB Laptop GPU + Host RAM**:
+Head-to-head comparison on **RTX 3050 (6GB) + Host RAM** with **Multi-Token Prediction (MTP) enabled on both**:
 
-| Metric | Measured Value | Configuration |
-| :--- | :--- | :--- |
-| **Model** | Groot-19B-A3B (Q3_K_S) | 41 Layers, 128 Experts, Top-8 Active |
-| **Prompt Processing (PP)** | **110.27 tokens/sec** | 508 tokens evaluated in 4.60s |
-| **Generation (Decode)** | **22.17 tokens/sec** | 250 tokens generated with MTP |
-| **VRAM Cache Hit Rate** | **67.97% - 86.29%** | Dynamic SLRU Hot Expert Cache |
-| **MTP Acceptance Rate** | **66.93%** | Mean acceptance length: 3.00 tokens |
-| **PCIe Weight Thrashing** | **0 MB** | Full Zero-Transfer CPU FFN |
+| Test Workload | Metric | Standard `llama.cpp` (with MTP) | BeyondVRAM Engine (with MTP) | BeyondVRAM Advantage |
+| :--- | :--- | :--- | :--- | :--- |
+| **Q1: Memory Wall & Hardware**<br>*(594 Prompt / 400 Decode)* | **Prompt Processing (PP)**<br>**Decode Generation**<br>Total Answer Time<br>VRAM Cache Hit Rate | 101.28 t/s<br>25.83 t/s<br>21.31 s<br>0.0% (No Cache) | **110.82 t/s**<br>**27.02 t/s**<br>**20.12 s**<br>**93.62%** (138k hits) | **+9.54 t/s faster PP**<br>**+1.19 t/s faster decode**<br>1.19s faster total<br>**178.4 GB bus traffic avoided** |
+| **Q2: Distributed 3D Parallelism**<br>*(566 Prompt / 400 Decode)* | **Prompt Processing (PP)**<br>**Decode Generation**<br>Total Answer Time<br>VRAM Cache Hit Rate | 219.43 t/s<br>21.74 t/s<br>20.94 s<br>0.0% (No Cache) | 179.13 t/s<br>**31.20 t/s**<br>**15.95 s**<br>**89.94%** (114k hits) | Prompt trade-off<br>**+9.46 t/s faster decode (+43.5%)**<br>**4.99s faster total**<br>**146.8 GB bus traffic avoided** |
+| **Q3: Compiler IRs & Microkernels**<br>*(517 Prompt / 400 Decode)* | **Prompt Processing (PP)**<br>**Decode Generation**<br>Total Answer Time<br>VRAM Cache Hit Rate | 249.40 t/s<br>21.42 t/s<br>20.70 s<br>0.0% (No Cache) | 195.23 t/s<br>**34.43 t/s**<br>**14.24 s**<br>**89.26%** (104k hits) | Prompt trade-off<br>**+13.01 t/s faster decode (+60.7%)**<br>**6.46s faster total**<br>**134.6 GB bus traffic avoided** |
+| **CUMULATIVE TOTALS** | **Average Decode Speed**<br>Total Tokens Generated<br>Total PCIe Traffic Saved | 22.99 t/s<br>1,200 tokens<br>0 GB | **30.88 t/s (+34.3% overall)**<br>1,200 tokens<br>**459.98 GB eliminated!** | **+7.89 t/s overall speedup**<br>100% precision maintained<br>**Zero PCIe weight thrashing** |
 
 ---
 
