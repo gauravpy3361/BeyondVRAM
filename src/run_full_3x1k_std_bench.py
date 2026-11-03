@@ -4,83 +4,105 @@ import os
 import re
 import json
 
-MODEL_PATH = r"C:\Users\gaurav\Downloads\ABDM\Groot-19B-A3B-261023.i1-Q3_K_S.gguf"
-CLI_PATH = r"C:\ai\llama.cpp\llama-cli.exe"
+CLI_PATH = os.environ.get("LLAMA_CLI_PATH", r"C:\ai\llama.cpp\llama-cli.exe")
+MODEL_PATH = os.environ.get(
+    "BEYONDVRAM_MODEL",
+    r"C:\Users\gaurav\Downloads\ABDM\Groot-19B-A3B-261023.i1-Q3_K_S.gguf",
+)
+OUT_JSON = os.path.join("benchmarks", "results_3x1k_std.json")
+LOG_DIR = os.path.join("benchmarks", "logs")
 
 PROMPTS = [
-    ("Q1", "Exascale Distributed AI Systems", r"C:\Users\gaurav\bench_1k_prompts\prompt_1k_q1_distributed.txt", r"C:\Users\gaurav\bench_1k_std_q1.log"),
-    ("Q2", "Autonomous Agent Operating System", r"C:\Users\gaurav\bench_1k_prompts\prompt_1k_q2_agent_os.txt", r"C:\Users\gaurav\bench_1k_std_q2.log"),
-    ("Q3", "High-Performance Compiler & Kernels", r"C:\Users\gaurav\bench_1k_prompts\prompt_1k_q3_compiler_simd.txt", r"C:\Users\gaurav\bench_1k_std_q3.log")
+    ("Q1", "Exascale Distributed AI Systems", os.path.join("benchmarks", "prompts", "prompt_1k_q1_distributed.txt"), os.path.join(LOG_DIR, "bench_1k_std_q1.log")),
+    ("Q2", "Autonomous Agent Operating System", os.path.join("benchmarks", "prompts", "prompt_1k_q2_agent_os.txt"), os.path.join(LOG_DIR, "bench_1k_std_q2.log")),
+    ("Q3", "High-Performance Compiler & Kernels", os.path.join("benchmarks", "prompts", "prompt_1k_q3_compiler_simd.txt"), os.path.join(LOG_DIR, "bench_1k_std_q3.log")),
 ]
 
-results = []
 
-for q_id, q_title, prompt_path, log_path in PROMPTS:
-    print(f"============================================================")
-    print(f"Running Standard Baseline for {q_id}: {q_title} (N=1000)")
-    print(f"============================================================")
+def main():
+    os.makedirs(LOG_DIR, exist_ok=True)
+    results = []
 
-    cmd = [
-        CLI_PATH,
-        "-m", MODEL_PATH,
-        "-c", "131072",
-        "-fa", "on",
-        "-ctk", "q4_0",
-        "-ctv", "q4_0",
-        "--spec-type", "draft-mtp",
-        "-f", prompt_path,
-        "-n", "1000",
-        "-st",
-        "--simple-io",
-        "--perf",
-        "-v"
-    ]
+    for q_id, q_title, prompt_path, log_path in PROMPTS:
+        print("============================================================")
+        print(f"Running Stock Auto-Fit Baseline for {q_id}: {q_title} (N=1000)")
+        print("============================================================")
 
-    t0 = time.time()
-    with open(log_path, "w", encoding="utf-8") as out:
-        p = subprocess.run(cmd, stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
-    elapsed = time.time() - t0
+        cmd = [
+            CLI_PATH,
+            "-m", MODEL_PATH,
+            "-c", "131072",
+            "-fa", "on",
+            "-ctk", "q4_0",
+            "-ctv", "q4_0",
+            "--spec-type", "draft-mtp",
+            "-f", prompt_path,
+            "-n", "1000",
+            "-st",
+            "--simple-io",
+            "--perf",
+            "-v",
+        ]
 
-    # Parse log
-    with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
-        text = f.read()
+        t0 = time.time()
+        with open(log_path, "w", encoding="utf-8") as out:
+            subprocess.run(cmd, stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
+        elapsed = round(time.time() - t0, 2)
 
-    pp_match = re.search(r'prompt eval time =\s+([\d\.]+)\s+ms\s+/\s+(\d+)\s+tokens\s+\(\s+[\d\.]+\s+ms per token,\s+([\d\.]+)\s+tokens per second\)', text)
-    tg_match = re.findall(r'eval time =\s+([\d\.]+)\s+ms\s+/\s+(\d+)\s+tokens\s+\(\s+[\d\.]+\s+ms per token,\s+([\d\.]+)\s+tokens per second\)', text)
-    draft_match = re.search(r'draft acceptance =\s+([\d\.]+)\s+\(\s*(\d+)\s+accepted\s+/\s+(\d+)\s+generated\)', text)
+        with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
+            text = f.read()
 
-    pp_tok = int(pp_match.group(2)) if pp_match else 0
-    pp_spd = float(pp_match.group(3)) if pp_match else 0.0
-    tg_tok = int(tg_match[-1][1]) if tg_match else 0
-    tg_spd = float(tg_match[-1][2]) if tg_match else 0.0
-    draft_pct = float(draft_match.group(1)) * 100.0 if draft_match else 0.0
+        timings = re.findall(r'"timings":(\{[^\}]+\})', text)
+        t_obj = json.loads(timings[-1]) if timings else {}
 
-    print(f"Finished {q_id} in {elapsed:.1f}s | PP: {pp_spd:.2f} t/s | Decode: {tg_spd:.2f} t/s | Draft: {draft_pct:.1f}%")
+        draft_n = t_obj.get("draft_n", 0)
+        draft_acc = t_obj.get("draft_n_accepted", 0)
+        draft_pct = round((draft_acc / draft_n) * 100.0, 2) if draft_n > 0 else 0.0
 
-    results.append({
-        "id": q_id,
-        "title": q_title,
-        "pp_tokens": pp_tok,
-        "pp_speed": pp_spd,
-        "tg_tokens": tg_tok,
-        "tg_speed": tg_spd,
-        "draft_rate": draft_pct,
-        "elapsed": elapsed
-    })
+        pp_tok = t_obj.get("prompt_n", 0)
+        pp_ms = round(t_obj.get("prompt_ms", 0.0), 2)
+        pp_spd = round(t_obj.get("prompt_per_second", 0.0), 2)
+        tg_tok = t_obj.get("predicted_n", 0)
+        tg_ms = round(t_obj.get("predicted_ms", 0.0), 2)
+        tg_spd = round(t_obj.get("predicted_per_second", 0.0), 2)
 
-avg_pp = sum(r["pp_speed"] for r in results) / len(results)
-avg_tg = sum(r["tg_speed"] for r in results) / len(results)
+        print(f"Finished {q_id} in {elapsed:.1f}s | PP: {pp_spd:.2f} t/s | Decode: {tg_spd:.2f} t/s | Draft: {draft_pct:.1f}%")
 
-summary = {
-    "results": results,
-    "summary": {
-        "avg_pp": avg_pp,
-        "avg_tg": avg_tg
-    }
-}
+        results.append({
+            "id": q_id,
+            "title": q_title,
+            "file": prompt_path.replace("\\", "/"),
+            "done": True,
+            "pp_tokens": pp_tok,
+            "pp_ms": pp_ms,
+            "pp_speed": pp_spd,
+            "tg_tokens": tg_tok,
+            "tg_ms": tg_ms,
+            "tg_speed": tg_spd,
+            "draft_accepted": draft_acc,
+            "draft_n": draft_n,
+            "draft_rate": draft_pct,
+            "elapsed": elapsed,
+        })
 
-with open(r"C:\Users\gaurav\bench_3x1k_std_results.json", "w", encoding="utf-8") as f:
-    json.dump(summary, f, indent=2)
+    avg_pp = round(sum(r["pp_speed"] for r in results) / len(results), 2)
+    avg_tg = round(sum(r["tg_speed"] for r in results) / len(results), 2)
 
-print("\nALL STANDARD RUNS FINISHED SUCCESSFULLY!")
-print(f"Average Standard Decode: {avg_tg:.2f} t/s | Average Standard PP: {avg_pp:.2f} t/s")
+    with open(OUT_JSON, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "results": results,
+                "summary": {
+                    "avg_pp": avg_pp,
+                    "avg_tg": avg_tg,
+                },
+            },
+            f,
+            indent=2,
+        )
+
+    print(f"\nSaved standard results to {OUT_JSON}")
+
+
+if __name__ == "__main__":
+    main()

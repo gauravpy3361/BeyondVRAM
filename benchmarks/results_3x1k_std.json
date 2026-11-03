@@ -3,36 +3,60 @@
     {
       "id": "Q1",
       "title": "Exascale Distributed AI Systems",
+      "file": "benchmarks/prompts/prompt_1k_q1_distributed.txt",
+      "done": true,
       "pp_tokens": 916,
+      "pp_ms": 9445.9,
       "pp_speed": 96.97,
       "tg_tokens": 1000,
+      "tg_ms": 70933.7,
       "tg_speed": 14.1,
-      "draft_rate": 44.574999999999996,
-      "elapsed": 96.58087205886841
+      "draft_accepted": 555,
+      "draft_n": 1245,
+      "draft_rate": 44.58,
+      "vram_used_mib": 3653,
+      "elapsed": 96.58
     },
     {
       "id": "Q2",
       "title": "Autonomous Agent Operating System",
+      "file": "benchmarks/prompts/prompt_1k_q2_agent_os.txt",
+      "done": true,
       "pp_tokens": 819,
+      "pp_ms": 6329.8,
       "pp_speed": 129.39,
       "tg_tokens": 1000,
+      "tg_ms": 67402.8,
       "tg_speed": 14.84,
-      "draft_rate": 37.846999999999994,
-      "elapsed": 95.36528706550598
+      "draft_accepted": 534,
+      "draft_n": 1411,
+      "draft_rate": 37.85,
+      "vram_used_mib": 3653,
+      "elapsed": 95.37
     },
     {
       "id": "Q3",
       "title": "High-Performance Compiler & Kernels",
+      "file": "benchmarks/prompts/prompt_1k_q3_compiler_simd.txt",
+      "done": true,
       "pp_tokens": 816,
+      "pp_ms": 4929.7,
       "pp_speed": 165.53,
       "tg_tokens": 1000,
+      "tg_ms": 54199.7,
       "tg_speed": 18.45,
-      "draft_rate": 48.644,
-      "elapsed": 75.05589556694031
+      "draft_accepted": 589,
+      "draft_n": 1211,
+      "draft_rate": 48.64,
+      "vram_used_mib": 3653,
+      "elapsed": 75.06
     }
   ],
   "summary": {
     "avg_pp": 130.63,
-    "avg_tg": 15.796666666666667
+    "avg_tg": 15.8,
+    "avg_draft": 43.69,
+    "total_decode_ms": 192536.2,
+    "total_wall_s": 267.01
   }
 }

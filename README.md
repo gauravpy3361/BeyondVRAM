@@ -1,143 +1,248 @@
 # BeyondVRAM
 
-> **Authoring: Hybrid Architecture** | **Applied Systems**  
-> *System architecture, problem formulation, and testing designed by me; implementation assisted by AI coding agents.*
+**Dynamic MoE Expert Caching, VRAM Budgeting, and Hardware Offloading Analysis for Consumer GPUs**
 
-[![Hardware Target](https://img.shields.io/badge/Hardware-RTX%203050%20(6GB)%20%2B%2016GB%20RAM-blue)](#hardware-specification)
-[![Architecture](https://img.shields.io/badge/Architecture-Sparse%20MoE%20Hybrid%20Offloading-orange)](#core-architecture)
-[![License](https://img.shields.io/badge/License-Apache%202.0-green)](#license)
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![Hardware](https://img.shields.io/badge/Tested_GPU-RTX_3050_6GB_Laptop-76b900.svg)](#hardware--test-environment)
+[![Model](https://img.shields.io/badge/Model-Groot--19B--A3B_(Q3__K__S)-orange.svg)](#memory-budgeting--model-geometry)
 
----
+BeyondVRAM is an engineering study, GGUF memory-budgeting toolkit, and C++/CUDA microbenchmark suite for running sparse Mixture-of-Experts (MoE) language models that exceed physical GPU memory—specifically **Groot-19B-A3B** (`19.4B` total parameters, `2.4B` active per token, `7.82 GiB` `Q3_K_S` GGUF) with a **131,072-token context window** on a **6 GB NVIDIA RTX 3050 Laptop GPU**.
 
-## Overview
+Rather than relying on default layer-by-layer offloading (`-fit on`), BeyondVRAM pairs exact GGUF tensor-header budgeting with **Segmented-LRU (SLRU) dynamic expert caching** (`--moe-cache-mib` in upstream `llama.cpp`), keeping `100%` of the non-expert backbone (`1,037 MiB`) and 128K hybrid KV/SSM context (`971.5 MiB`) pinned in VRAM while dynamically caching hot routed experts (`1.29 MiB` each) in the remaining `3,300 MiB` of GDDR6.
 
-**BeyondVRAM** is a high-performance inference runtime architecture designed to break the memory-bandwidth wall for **Mixture-of-Experts (MoE)** Large Language Models on consumer-grade, memory-constrained hardware (e.g. 4GB–8GB laptop GPUs and single/dual-channel DDR4/DDR5 system RAM).
-
-Instead of conventional, monolithic layer-by-layer offloading—which causes catastrophic GPU stalls and PCIe bus saturation—BeyondVRAM reorganizes model execution around fine-grained, asynchronous hardware orchestration.
+![Benchmark Results Summary](docs/assets/benchmark_results.png)
 
 ---
 
-## The 3 Core Pillars & Validated Benchmarks
+## Key Takeaways
 
-All three architectural pillars have been physically implemented and benchmarked on an **NVIDIA GeForce RTX 3050 6GB Laptop GPU + Host CPU**:
-
-```
-Token In
-   │
-   ├─► 1. Dense Attention Backbone & Routers ──► Pinned permanently in GPU VRAM
-   │
-   ├─► 2. Top-K Routed Experts:
-   │      ├─► Hot Cache (SLRU) In VRAM (~68% - 86% hits) ─► Direct GDDR6 execution
-   │      ├─► Warm Multi-Token Incoming Experts ─────────► Async DMA Pipelining (Masked)
-   │      └─► Cold Single-Shot Experts ──────────────────► Zero-Transfer CPU FFN (In-place)
-   │
-   └─► Only tiny activation vectors traverse PCIe, completely eliminating weight thrashing.
-```
-
-### Pillar 1: Hot Cache in VRAM & RAM (Dynamic Expert Caching)
-* **Implementation:** [`src/header_parser.py`](src/header_parser.py), [`src/moe_cache.py`](src/moe_cache.py), [`src/beyond_vram_cache.h`](src/beyond_vram_cache.h).
-* **Mechanism:** Pins the 1.22 GB non-expert backbone in VRAM and turns the remaining ~4.0 GB into an SLRU cache holding ~3,100 expert slots.
-* **Measured Result:** **67.97% to 86.29% cache hit rate**, eliminating **35.66 GB of PCIe bus traffic per 100 tokens**.
-
-### Pillar 2: Split the Math (Async Compute & DMA Pipelining)
-* **Implementation:** [`src/async_pipeline.cu`](src/async_pipeline.cu), [`src/async_pipeline.py`](src/async_pipeline.py).
-* **Mechanism:** Decouples the Compute Engine (Stream 0) from the PCIe DMA Copy Engine (Stream 1). Missing expert weights stream across PCIe concurrently while Attention computes on GPU.
-* **Measured Result:** **83.35% direct latency cut** (from 0.868 ms down to 0.144 ms per step), providing a **6.01x hardware speedup**.
-
-### Pillar 3: Zero-Transfer CPU FFN (Asymmetric In-Place Execution)
-* **Implementation:** [`src/zero_transfer_ffn.cpp`](src/zero_transfer_ffn.cpp), [`src/zero_transfer_ffn.py`](src/zero_transfer_ffn.py).
-* **Mechanism:** For single-shot cold experts, weights never leave host RAM. The GPU sends only the 8 KB activation vector; the CPU executes SIMD AVX2 math in-place and sends the 2 KB result vector back.
-* **Apples-to-Apples Measured Result:** **6.69x faster than PCIe weight transfer + GPU GEMV** (0.127 ms vs 0.850 ms per cold call), eliminating **99.76% of PCIe bus data movement** with **ZERO weight bytes** crossing the bus.
+1. **Dynamic SLRU Caching Beats Both Stock Auto-Fit and Tuned Static `--n-cpu-moe`:**
+   - Under controlled deterministic decoding (`--temp 0 --seed 42`, 128K context reservation), manually tuning static MoE offloading (`--n-cpu-moe 23`, placing 18 layers in VRAM and 23 on CPU) improves decode throughput from **`14.80 t/s`** (Stock Auto-Fit) to **`20.56 t/s`** (`+38.9%`).
+   - Adding a dynamic SLRU expert cache on top of CPU-offloaded experts further increases decode throughput to **`23.42 t/s`** (`Full 3,300 MiB SLRU Cache`, `89.8%` hit rate) and **`24.02 t/s`** (`Hybrid -ncmoe 31 + 1,650 MiB Cache`, `+16.8%` over tuned static, `+62.3%` over stock).
+2. **Disabling Speculative MTP (`ubatch = 1`) Reaches `33.83 tokens/sec`:**
+   - Verifying 4 speculative draft tokens (`--spec-type draft-mtp`, `ubatch = 4`) activates ~2.5x–3x more unique experts per layer while accepting ~35%–45% of drafted tokens, penalizing bandwidth-limited CPU/PCIe MoE layers.
+   - Switching to standard single-token decoding (`--spec-type none`, `ubatch = 1`) achieves an **`88.86%` SLRU cache hit rate** (`< 1` cache miss per layer per token) and **`33.83 t/s`**—**`+29.9%` faster** than tuned static `--n-cpu-moe 23` (`26.05 t/s`) and **`2.29x` faster** than stock Auto-Fit (`14.80 t/s`).
+3. **Prefill vs. Decode Trade-Off:**
+   - Static GPU layer placement (`--n-cpu-moe 23`) achieves the fastest prompt prefill (**`312.8–348.5 t/s`**) because 18 layers of experts are permanently resident in VRAM with zero copy overhead.
+   - Dynamic SLRU caching trades slower prompt prefill (`217.1–256.7 t/s`, or `62.3 t/s` cold-cache) for significantly higher sustained decode throughput (`88.9%–90.2%` of active decode experts served directly from GDDR6).
+4. **Hardware-Verified Dual-Stream Overlap & Cold-Expert Physics:**
+   - Standalone CUDA/C++ microbenchmarks profiled with **NVIDIA Nsight Systems (`nsys`)** demonstrate that overlapping a `1.29 MiB` asynchronous host-to-device expert DMA (`Stream 1`) behind `0.264 ms` of active GPU attention + hot-expert compute (`Stream 0`) reduces per-step latency from `0.464 ms` to **`0.287 ms` (`1.61x` speedup / `38.1%` reduction)**.
+   - For a true 3-matrix quantized SwiGLU expert (`1.29 MiB`), a GPU SLRU cache hit takes **`0.052 ms`**, a cold PCIe weight upload + GPU execution takes **`0.193 ms`**, and in-place CPU AVX2 execution (including `0.049 ms` for `16 KiB` bidirectional GPU↔CPU activation sync) takes **`0.148 ms`**.
 
 ---
 
-## Head-to-Head Comparison: Standard `llama.cpp` vs BeyondVRAM
+## Scope & Implementation Boundary
 
-To rigorously evaluate real-world performance, BeyondVRAM was benchmarked side-by-side against **Standard `llama.cpp`** on a sustained long-sequence workload: three massive, production-grade technical queries each ingesting **~800–920 prompt tokens** and generating **exactly 1,000 continuous decode tokens** (3,000 generated tokens total) with a **131,072 (128K) allocated context window**.
+To keep claims verifiable and transparent, the repository separates end-to-end runtime benchmarks from standalone microbenchmarks and analytical models:
 
-* **Hardware:** NVIDIA GeForce RTX 3050 Laptop GPU (6,143 MiB GDDR6, PCIe 4.0 x4) + 16GB Host DDR4
-* **Workload Scope:** 3 runs $\times$ 1,000 continuous decode tokens each = **6,000 total benchmark tokens evaluated**
-* **VRAM Safety:** Strict 3,300 MiB cache cap with +364 MiB clean headroom. Zero Windows WDDM paging thrashing.
-
-> **Context Window Allocation vs. Sequence Length Clarification:**
-> * **VRAM Allocation (128K Reserved):** The engine is executed with `-c 131072 -fa on -ctk q4_0 -ctv q4_0`, reserving the physical memory structures for up to **131,072 tokens in GDDR6 (~1.9 GB)**. This verifies that BeyondVRAM runs stably under maximum context reservation without triggering Windows shared-memory paging.
-> * **Active Sequence Length:** Each individual benchmark query ingests **~800–920 prompt tokens** and generates **1,000 continuous decode tokens**, testing an active sequence length of **~1,800–1,920 tokens** per run.
-
-| Benchmark Query & Domain | Metric | Standard `llama.cpp` (Auto-Fit) | BeyondVRAM (Dynamic Cache) | BeyondVRAM Advantage |
-| :--- | :--- | :---: | :---: | :---: |
-| **Q1: Exascale Distributed Systems**<br>*(916 Prompt / 1,000 Decode)* | **Sustained Decode**<br>Prompt Prefill (PP)<br>MoE Cache Hit Rate<br>MTP Speculative Rate<br>**Total Run Time** | 14.10 t/s<br>**96.97 t/s**<br>0.0% (No Cache)<br>44.6%<br>96.58 s | **23.60 t/s**<br>61.90 t/s<br>**87.8%**<br>**46.0%**<br>**69.30 s** | **+67.4% Decode Speedup**<br>*(Dynamic cache offload)*<br>**+87.8% Cache Hits**<br>+1.4% MTP Draft<br>**27.3s Faster (-28.2%)** |
-| **Q2: Autonomous AgentOS Kernel**<br>*(819 Prompt / 1,000 Decode)* | **Sustained Decode**<br>Prompt Prefill (PP)<br>MoE Cache Hit Rate<br>MTP Speculative Rate<br>**Total Run Time** | 14.84 t/s<br>**129.39 t/s**<br>0.0% (No Cache)<br>37.8%<br>95.37 s | **24.75 t/s**<br>59.13 t/s<br>**90.2%**<br>**45.2%**<br>**66.49 s** | **+66.8% Decode Speedup**<br>*(Dynamic cache offload)*<br>**+90.2% Cache Hits**<br>+7.4% MTP Draft<br>**28.9s Faster (-30.3%)** |
-| **Q3: High-Performance Compiler & Kernels**<br>*(816 Prompt / 1,000 Decode)* | **Sustained Decode**<br>Prompt Prefill (PP)<br>MoE Cache Hit Rate<br>MTP Speculative Rate<br>**Total Run Time** | 18.45 t/s<br>**165.53 t/s**<br>0.0% (No Cache)<br>**48.6%**<br>75.06 s | **22.42 t/s**<br>65.84 t/s<br>**89.0%**<br>42.4%<br>**70.15 s** | **+21.5% Decode Speedup**<br>*(Dynamic cache offload)*<br>**+89.0% Cache Hits**<br>-6.2% MTP Draft<br>**4.9s Faster (-6.5%)** |
-| **SUITE BENCHMARK AVERAGE** | **Sustained Decode**<br>Prompt Prefill (PP)<br>MoE Cache Hit Rate<br>MTP Speculative Rate<br>**Total Wall-Clock Time** | 15.80 t/s<br>**130.63 t/s**<br>0.0% (No Cache)<br>43.7%<br>267.01 s | **23.59 t/s**<br>62.29 t/s<br>**89.0%**<br>**44.5%**<br>**205.94 s** | **+49.3% Sustained Decode**<br>*(Long-generation speedup)*<br>**89.0% Transit Cut**<br>+0.8% MTP Draft<br>**61.1s Total Time Saved** |
-
-### Critical Engineering Insights:
-1. **+49.3% Sustained Decode Acceleration:** On heavy, long-sequence generation (1,000 tokens), Standard `llama.cpp` bottlenecks on the PCIe bus as it drags un-cached expert weights back and forth, stalling generation at **14–15 t/s**. BeyondVRAM delivers **23.6–24.8 t/s** on distributed systems and agentic workflows (**+67% faster**).
-2. **61.1 Seconds of Waiting Eliminated:** Across all three 1,000-token answers, BeyondVRAM completed the suite in **205.9 seconds** versus **267.0 seconds** for standard `llama.cpp`—saving over **a full minute of idle waiting** on a budget 6GB laptop GPU.
-3. **Transparent Architectural Trade-Off:** Standard `llama.cpp` achieves faster prefill (130 t/s vs 62 t/s) because it leaves all GPU VRAM unreserved for static dense layer offloading. However, once decoding begins, BeyondVRAM's dynamic SLRU hot cache keeps **89.0%** of all active expert lookups in GDDR6, eliminating over **1.1 Terabytes of PCIe weight transfers** and overwhelmingly winning total generation time.
+| Component | Implementation in this Repo | Role |
+| :--- | :--- | :--- |
+| **End-to-End Inference Runtime** | Upstream `llama.cpp` (`b1-ac8e169`, `src/llama-moe-cache.cpp`) | Executes GGUF inference with `--cpu-moe`, `--n-cpu-moe`, and `--moe-cache-mib` SLRU caching. |
+| **GGUF Memory Budgeter** | [`src/header_parser.py`](src/header_parser.py) | Parses binary GGUF headers (including hybrid full-attention / recurrent SSM layers) to compute exact VRAM budgets. |
+| **Benchmark Suites** | [`src/run_controlled_ablation.py`](src/run_controlled_ablation.py), [`src/run_full_3x1k_bench.py`](src/run_full_3x1k_bench.py), [`src/run_full_3x1k_std_bench.py`](src/run_full_3x1k_std_bench.py) | Automated runners and raw JSON telemetry in [`benchmarks/`](benchmarks/). |
+| **CUDA/C++ Microbenchmarks** | [`src/async_pipeline.cu`](src/async_pipeline.cu), [`src/zero_transfer_ffn.cpp`](src/zero_transfer_ffn.cpp), [`src/beyond_vram_cache.cpp`](src/beyond_vram_cache.cpp) | Standalone compiled benchmarks for dual-stream DMA overlap (`nsys` traced), CPU vs. GPU cold-expert execution, and SLRU unit tests. |
+| **Analytical Simulators** | [`src/moe_cache.py`](src/moe_cache.py), [`src/async_pipeline.py`](src/async_pipeline.py), [`src/zero_transfer_ffn.py`](src/zero_transfer_ffn.py), [`src/benchmark_comparator.py`](src/benchmark_comparator.py) | Python analytical models calibrated to measured hardware constants. |
 
 ---
 
-## PCIe Transit Elimination & Bus Traffic Reconciliation
+## Hardware & Test Environment
 
-BeyondVRAM reconciles two complementary execution paths depending on execution mode:
-1. **Dynamic GPU Cache Mode (Production Engine):** Cache hits (89%) require zero PCIe bus traffic. Cache misses stream the requested expert weights into the dynamic GPU SLRU cache.
-2. **Zero-Transfer CPU FFN Mode (Asymmetric Architecture):** For single-shot cold outliers, weights remain in host RAM, transferring only 10 KB activation vectors.
-
-| Generated Tokens | Total Expert Lookups | Naive Offload Traffic | BeyondVRAM Dynamic Cache | Bus Traffic Eliminated | Transit Time Saved | + Zero-Transfer Path |
-| :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **100 Tokens** | 32,800 calls | 41.32 GB | 4.55 GB | **36.78 GB (89.0%)** | **7.66 seconds** | **0.034 GB (99.9%)** |
-| **500 Tokens** | 164,000 calls | 206.60 GB | 22.73 GB | **183.88 GB (89.0%)** | **38.31 seconds** | **0.172 GB (99.9%)** |
-| **1,000 Tokens** | 328,000 calls | 413.20 GB | 45.45 GB | **367.75 GB (89.0%)** | **76.61 seconds** | **0.344 GB (99.9%)** |
-
----
-
-## Architectural Implementation & Ecosystem Role
-
-* **Production Runtime Engine:** Large-scale benchmarks run on top of the native `llama.cpp` inference engine utilizing dynamic MoE caching (`--moe-cache-mib`), parameterized by BeyondVRAM's GGUF parser and VRAM budgeter.
-* **Reference Implementations:** This repository provides complete, self-contained reference C++ and CUDA implementations demonstrating the underlying systems primitives:
-  * [`src/beyond_vram_cache.h`](src/beyond_vram_cache.h) & [`src/beyond_vram_cache.cpp`](src/beyond_vram_cache.cpp): Full native C++ Segmented-LRU (SLRU) cache controller.
-  * [`tests/test_cache.cpp`](tests/test_cache.cpp): Unit test suite for SLRU hit, miss, promotion, and eviction invariants.
-  * [`src/async_pipeline.cu`](src/async_pipeline.cu): Dual-stream CUDA asynchronous DMA prefetching engine.
-  * [`src/zero_transfer_ffn.cpp`](src/zero_transfer_ffn.cpp): Apples-to-apples in-place CPU AVX2 FFN vs. GPU GEMV benchmark.
+| Parameter | Specification |
+| :--- | :--- |
+| **GPU** | NVIDIA GeForce RTX 3050 6GB Laptop GPU (`6,143 MiB` GDDR6, Compute Capability `8.6`, PCIe 4.0) |
+| **CPU** | Intel Core 5 210H (`8` physical cores / `12` threads, AVX2 + FMA, OpenMP) |
+| **System RAM** | 16 GB DDR4 |
+| **OS & Toolchains** | Windows 11 (WDDM 3.x), CUDA Toolkit 13.2 (`nvcc`), MSVC 19.44 (`cl.exe`), Nsight Systems `2025.6.3` |
+| **Inference Engine** | `llama.cpp` build `b1-ac8e169` (`CUDA0`) |
+| **Target Model** | `Groot-19B-A3B-261023.i1-Q3_K_S.gguf` (`7.82 GiB`, `qwen35moe`, `41` MoE layers, `128` experts/layer, `Top-8` routing) |
 
 ---
 
-## Project Structure
+## Memory Budgeting & Model Geometry
 
-```
+Running [`src/header_parser.py`](src/header_parser.py) on `Groot-19B-A3B-261023.i1-Q3_K_S.gguf` extracts the exact tensor layout without loading the `7.82 GiB` payload into memory:
+
+- **Hybrid Attention / Recurrent Architecture:** `40` main blocks + `1` MTP (`nextn`) block = `41` MoE blocks. Only `10` blocks (`blk.3, 7, ..., 39`) use full Grouped-Query Attention (`n_head_kv = 2`, `d_k = d_v = 256`); the remaining `31` blocks use constant-size recurrent/SSM state buffers.
+- **Exact Tensor Split:**
+  - **Non-Expert Backbone (`CUDA0`):** `1,036.93 MiB` (`13.29%` of model file — embeddings, norms, routers, shared experts, attention/SSM weights, output head).
+  - **Routed MoE Experts (`CPU_Mapped`):** `6,765.00 MiB` (`86.71%` of model file — `5,248` total experts across 41 layers, exactly **`1.289 MiB` (`1,351,680 B`)** per quantized 3-matrix SwiGLU expert).
+- **128K Context Allocation (`-c 131072 -ctk q4_0 -ctv q4_0`):** `720.00 MiB` (`q4_0` KV cache across 10 full-attention layers) + `251.50 MiB` (recurrent state) = **`971.50 MiB`**.
+- **VRAM Allocation across Configurations (out of `6,143 MiB` physical GDDR6):**
+
+| Configuration | CLI Offload Flags | Static GPU MoE Layers | Dynamic GPU MoE Cache | Model Buffer (`MiB`) | Context + Cache (`MiB`) | Compute (`MiB`) | Total VRAM Used (`MiB`) |
+| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Stock Auto-Fit** | `-fit on` (default `1024 MiB` margin) | 7 / 41 | `0 MiB` | 2,245 | 971 | 436 | **3,653** |
+| **Tuned Static** | `-fit off -ngl 99 -ncmoe 23` | 18 / 41 | `0 MiB` | 4,006 | 971 | 471 | **5,449** |
+| **Hybrid Static + SLRU** | `-fit off -ngl 99 -ncmoe 31 --moe-cache-mib 1650` | 10 / 41 | `1,650 MiB` (`1,280` slots) | 2,686 | 2,621 | 471 | **5,779** |
+| **Full SLRU Cache** | `-cmoe --moe-cache-mib 3300` | 0 / 41 | `3,300 MiB` (`2,560` slots) | 1,036 | 4,271 | 471 | **5,779** |
+
+---
+
+## End-to-End Benchmark Results
+
+### 1. Controlled Deterministic Ablation (`--temp 0`, Repeats, Tuned Baselines & MTP Ablation)
+
+To eliminate sampling variance and compare against a properly tuned static `--n-cpu-moe` baseline, [`src/run_controlled_ablation.py`](src/run_controlled_ablation.py) evaluates all 6 configurations under deterministic greedy decoding (`--temp 0 --seed 42`) on the 916-token Q1 prompt generating 200 tokens with a 128K context reservation (`-c 131072 -fa on -ctk q4_0 -ctv q4_0`). Raw data: [`benchmarks/ablation_results.json`](benchmarks/ablation_results.json).
+
+| Configuration | MTP Mode | Repeats | Prefill Median (`t/s`) | Decode Median (`t/s`) | Decode Range (`min–max t/s`) | Decode Cache Hit Rate | Decode Uploaded (`MiB`) | Prefill Cache Copied (`MiB`) | Speedup vs. Stock Auto-Fit | Speedup vs. Tuned Static |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Stock Auto-Fit (`-fit on`)** | `draft-mtp` | 3 | 223.98 | **14.80** | 14.73–15.61 | 0.0% | 0.0 | 0.0 | 1.00x (Baseline) | -28.0% |
+| **Tuned Static (`--n-cpu-moe 23`)** | `draft-mtp` | 3 | **312.84** | **20.56** | 20.29–21.28 | 0.0% | 0.0 | 0.0 | +38.9% | 1.00x (Static) |
+| **Full SLRU Cache (`3,300 MiB`)** | `draft-mtp` | 3 | 217.06 | **23.42** | 23.24–23.74 | **89.77%** | 10,588.4 | 1,397.3 | +58.2% | **+13.9%** |
+| **Hybrid (`-ncmoe 31 + 1,650 MiB`)** | `draft-mtp` | 3 | 250.85 | **24.02** | 22.54–24.15 | **75.35%** | 19,390.1 | 1,091.8 | +62.3% | **+16.8%** |
+| **Tuned Static (`--n-cpu-moe 23`)** | `none` (`ubatch=1`) | 2 | **348.48** | **26.05** | 25.86–26.24 | 0.0% | 0.0 | 0.0 | +76.0% | 1.00x (Static) |
+| **Full SLRU Cache (`3,300 MiB`)** | `none` (`ubatch=1`) | 2 | 256.71 | **33.83** | 33.35–34.31 | **88.86%** | 9,407.6 | 1,945.2 | **+128.6% (2.29x)** | **+29.9%** |
+
+#### How `llama_moe_cache` Separates Prefill and Decode Telemetry
+Inspection of `src/llama-moe-cache.cpp` confirms how cache counters behave across batch sizes:
+- **Decode & MTP Verification (`ubatch <= 8`):** Only small micro-batches query `get_slot_map()`, update the SLRU `protected`/`probation` lists, upload misses via `ggml_backend_tensor_set_async`, and increment the `hits` and `misses` counters.
+  - At `ubatch = 1` (`--spec-type none`), 200 generated tokens produce `58,237` hits and `7,298` misses (**`88.86%` hit rate**), averaging only **`0.91` cache misses per layer per token**.
+  - At `ubatch = 4` (`--spec-type draft-mtp`), 200 generated tokens (`34.7%` draft acceptance) produce `72,054` hits and `8,214` misses (**`89.77%` hit rate**).
+- **Prompt Prefill (`n_tokens > 32`):** During prefill, `get_slot_map()` returns `nullptr` so large prompt batches never evict or thrash the decode SLRU cache. Instead, `copy_experts()` copies any already-resident experts from GPU cache (`large batches: 3,252–4,527 experts copied`) and computes remaining host experts on the CPU.
+
+---
+
+### 2. Long-Generation Suite: 3× (~1K Prompt × 1K Decode, 3,000 Generated Tokens)
+
+Evaluates sustained generation across three long-form technical prompts (`Q1: Distributed 3D Parallelism`, `Q2: Autonomous AgentOS Kernel`, `Q3: Compiler IR & CUDA PTX`) with `--spec-type draft-mtp` and `-c 131072`. Raw data: [`benchmarks/results_3x1k.json`](benchmarks/results_3x1k.json) and [`benchmarks/results_3x1k_std.json`](benchmarks/results_3x1k_std.json).
+
+| Workload | Prompt Tokens | Decode Tokens | Stock Auto-Fit Prefill (`t/s`) | BeyondVRAM Prefill (`t/s`) | Stock Auto-Fit Decode (`t/s`) | BeyondVRAM Decode (`t/s`) | Decode Speedup | BeyondVRAM Decode Hit Rate | Stock MTP Accept | BeyondVRAM MTP Accept | Stock Wall Time (`s`) | BeyondVRAM Wall Time (`s`) |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Q1: Distributed AI Systems** | 916 | 1,000 | 96.97 | 61.90 | 14.10 | **23.60** | **+67.4%** | 87.75% | 44.6% | 46.0% | 96.58 | **69.30** |
+| **Q2: AgentOS Kernel** | 819 | 1,000 | 129.39 | 59.13 | 14.84 | **24.75** | **+66.8%** | 90.15% | 37.8% | 45.2% | 95.37 | **66.49** |
+| **Q3: Compiler & CUDA PTX** | 816 | 1,000 | 165.53 | 65.84 | 18.45 | **22.42** | **+21.5%** | 89.05% | 48.6% | 42.4% | 75.06 | **70.15** |
+| **Suite Mean / Total** | **2,551** | **3,000** | **130.63** | **62.29** | **15.80** | **23.59** | **+49.3%** | **88.98%** | **43.7%** | **44.5%** | **267.01** | **205.94** |
+
+> **Note on Q3 Variance:** The 3×1K runs used default stochastic sampling (`temp = 1.0`), which caused Q3's stock baseline trajectory to hit a higher speculative MTP acceptance rate (`48.6%` vs `42.4%` in the cached run), narrowing Q3's relative gain to `+21.5%`. When trajectories are locked with `--temp 0 --seed 42` (Section 1 above), run-to-run decode variance is `< 0.5 t/s`.
+
+---
+
+## Hardware Design Validation & Microbenchmarks
+
+To study the hardware bottlenecks underlying MoE offloading in isolation, the repository includes two compiled CUDA/C++ microbenchmarks and a reference C++17 SLRU cache implementation.
+
+### 1. Dual-Stream Compute & PCIe DMA Overlap ([`src/async_pipeline.cu`](src/async_pipeline.cu))
+
+When a cold expert misses the GPU cache, its `1.29 MiB` (`1,351,680 B`) quantized payload must cross the PCIe 4.0 bus from pinned host memory (`cudaMallocHost`). [`src/async_pipeline.cu`](src/async_pipeline.cu) benchmarks two execution modes across 200 steps:
+- **Mode A (Sequential Single-Stream):** `Stream 0` executes dense attention + 7 resident GPU experts (`0.264 ms`), waits for a blocking `1.29 MiB` HtoD DMA (`0.117 ms`), and then runs `cold_expert_swiglu_kernel` (`0.011 ms`) on the transferred buffer.
+- **Mode B (Dual-Stream Pipelined with Bidirectional `cudaEvent_t` Lockstep):** `Stream 0` records `router_ready_event[slot]` and begins computing attention + 7 resident GPU experts (`0.264 ms`). Concurrently, `Stream 1` (`stream_dma`) waits on `router_ready_event[slot]`, streams the `1.29 MiB` cold expert over PCIe (`0.117 ms` @ `11.04 GiB/s`), and records `dma_ready_event[slot]`. `Stream 0` waits on `dma_ready_event[slot]` before launching `cold_expert_swiglu_kernel` (`0.00e+00` max numerical diff vs. Mode A).
+
+![NVIDIA Nsight Systems Dual-Stream Timeline](docs/assets/nsys_timeline.png)
+
+| Execution Mode | Hot Compute (`ms`) | `1.29 MiB` HtoD DMA (`ms`) | Cold Expert Kernel (`ms`) | Total Step Latency (`ms`) | Effective Speedup |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **Mode A: Sequential (Single Stream)** | 0.264 | 0.117 (Exposed) | 0.011 | **0.464 ms** | 1.00x |
+| **Mode B: Dual-Stream Overlapped (`nsys` verified)** | 0.264 | 0.117 (Hidden on `Stream 14`) | 0.011 | **0.287 ms** | **1.61x (-38.1% latency)** |
+
+---
+
+### 2. Cold-Expert Execution: GPU PCIe Upload vs. Zero-Transfer CPU AVX2 ([`src/zero_transfer_ffn.cpp`](src/zero_transfer_ffn.cpp))
+
+When an expert is not in VRAM and will only be used for a single token (`ubatch = 1`), should the runtime upload `1.29 MiB` of weights to the GPU or execute the expert in-place on the CPU and transfer only the `d_model = 2048` FP32 activations (`8 KiB` D2H + `8 KiB` H2D = `16 KiB`)?
+
+[`src/zero_transfer_ffn.cpp`](src/zero_transfer_ffn.cpp) benchmarks a full 3-matrix quantized SwiGLU expert (`W_gate [512×2048]`, `W_up [512×2048]`, `W_down [2048×512]`, `1,351,680 B` total) across all three paths, explicitly including the per-call GPU↔CPU activation DMA and `cudaStreamSynchronize` latency on the CPU path:
+
+| Cold/Hot Expert Path | PCIe Bytes Transferred | Compute Time (`ms`) | PCIe / Sync Overhead (`ms`) | Total Latency per Expert (`ms`) | Relative Speed |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **Path 0: GPU SLRU Cache Hit (Resident in VRAM)** | `0 B` | 0.052 | 0.000 | **0.052 ms** | **3.68x faster than Path A** |
+| **Path A: Cold Expert via PCIe Weight Upload + GPU SwiGLU** | `1,351,680 B` (`1.29 MiB`) | 0.052 | 0.141 | **0.193 ms** | 1.00x (Cold Upload Baseline) |
+| **Path B: Cold Expert via CPU OpenMP+AVX2 + `16 KiB` Sync** | `16,384 B` (`16.0 KiB`) | 0.099 | 0.049 | **0.148 ms** | **1.30x faster than Path A (98.8% less PCIe)** |
+
+**Architectural Implication:**
+- Serving an expert from the **GPU SLRU Cache (`0.052 ms`)** is **`2.83x` faster** than CPU AVX2 execution (`0.148 ms`) and **`3.68x` faster** than uploading over PCIe (`0.193 ms`). This explains why maintaining an `88.9%–90.2%` GPU SLRU hit rate is the dominant driver of end-to-end decode throughput.
+- For isolated single-token misses (`ubatch = 1`) that do not get reused in the cache, in-place CPU AVX2 execution (`0.148 ms`) is `1.30x` faster than an un-overlapped PCIe upload (`0.193 ms`), though roughly `33%` of the CPU path's latency (`0.049 ms`) is spent on per-layer GPU↔CPU synchronization.
+
+---
+
+## Related Work
+
+BeyondVRAM builds upon and complements prior work on MoE offloading and sparse inference on memory-constrained hardware:
+
+- **[Mixtral-Offloading](https://arxiv.org/abs/2312.17238) (Eliseev & Mazur, 2023):** Introduced LRU expert caching in VRAM combined with speculative next-layer expert prefetching for Mixtral-8x7B. BeyondVRAM evaluates a two-segment SLRU policy (probation + protected tiers) on a much denser routing topology (`41` layers × `128` experts, `Top-8` routing) where scan-resistance prevents single-use burst experts from evicting core experts.
+- **[Fiddler](https://arxiv.org/abs/2402.07033) (Kamahori et al., 2024):** Demonstrated that executing cold MoE experts on the host CPU and transferring only activations across PCIe outperforms copying expert weights over PCIe for single-token decoding. Our [`src/zero_transfer_ffn.cpp`](src/zero_transfer_ffn.cpp) microbenchmark reproduces this trade-off (`0.148 ms` CPU AVX2 + sync vs. `0.193 ms` PCIe weight upload) while showing that cached GPU hits (`0.052 ms`) remain `2.83x` faster than CPU execution.
+- **[MoE-Infinity](https://arxiv.org/abs/2401.14361) (Xue et al., 2024) & [KTransformers](https://github.com/kvcache-ai/ktransformers) (2024):** Combine sequence-level expert activation tracing, prefetching, and optimized CPU/GPU hybrid kernels (`AMX`/`AVX-512` on server CPUs + CUDA attention).
+- **Upstream `llama.cpp` (`--cpu-moe`, `--n-cpu-moe`, `--moe-cache-mib`):** Provides the production `ggml` tensor overrides and `llama_moe_cache` SLRU implementation benchmarked in this repository.
+
+---
+
+## Repository Structure
+
+```text
 BeyondVRAM/
-├── .gitignore                    # Ignores model weights and temporary files
-├── README.md                     # Architecture, benchmarks & specifications
+├── LICENSE                             # Apache-2.0 License
+├── README.md                           # Documentation, benchmarks, and reproduction guide
 ├── docs/
-│   └── ARCHITECTURE.md           # Detailed systems specification
+│   ├── ARCHITECTURE.md                 # Detailed memory hierarchy & runtime specification
+│   └── assets/
+│       ├── benchmark_results.png       # Controlled ablation & 3x1K suite chart
+│       └── nsys_timeline.png           # Nsight Systems dual-stream overlap timeline
 ├── benchmarks/
-│   ├── results_3x1k.json         # BeyondVRAM 3x (1K x 1K) raw metrics
-│   ├── results_3x1k_std.json     # Standard llama.cpp 3x (1K x 1K) baseline metrics
-│   └── prompts/                  # Full 1K-token stress prompt suites
-│       ├── prompt_1k_q1_distributed.txt
-│       ├── prompt_1k_q2_agent_os.txt
-│       └── prompt_1k_q3_compiler_simd.txt
-├── tests/
-│   └── test_cache.cpp            # C++ SLRU Cache Unit Tests
-└── src/
-    ├── __init__.py
-    ├── header_parser.py          # Step 1: Dynamic GGUF geometry & KV cache budgeter
-    ├── moe_cache.py              # Step 1: Python simulation of SLRU Hot Cache
-    ├── beyond_vram_cache.h       # Step 1: C++ SLRU Cache controller interface
-    ├── beyond_vram_cache.cpp     # Step 1: Native C++ SLRU Cache implementation
-    ├── async_pipeline.cu         # Step 2: Dual-stream CUDA async DMA prefetch engine
-    ├── async_pipeline.py         # Step 2: Python simulation of async pipeline
-    ├── zero_transfer_ffn.cpp     # Step 3: Apples-to-apples in-place CPU AVX2 vs GPU GEMV
-    ├── zero_transfer_ffn.py      # Step 3: Asymmetric dispatch heuristic & simulator
-    ├── benchmark_comparator.py   # Reconciled PCIe bus transit & time savings calculator
-    ├── create_1k_prompts.py      # Prompt generator for the 1Kx1K benchmark suite
-    ├── run_full_3x1k_bench.py    # BeyondVRAM 3x (1K x 1K) stress runner
-    ├── run_full_3x1k_std_bench.py# Standard baseline 3x (1K x 1K) runner
-    └── measure_context_scaling.py# 4K to 128K context memory scaling evaluator
+│   ├── ablation_results.json           # Controlled deterministic ablation (--temp 0, 6 configs)
+│   ├── results_3x1k.json               # BeyondVRAM 3x (1K prompt x 1K decode) telemetry
+│   ├── results_3x1k_std.json           # Stock Auto-Fit 3x (1K prompt x 1K decode) telemetry
+│   ├── nsys_trace_summary.json         # Extracted CUPTI kernel & DMA timestamps from nsys
+│   └── prompts/                        # 1K-token technical benchmark prompts (Q1, Q2, Q3)
+├── src/
+│   ├── header_parser.py                # Binary GGUF header parser & hybrid KV/VRAM budgeter
+│   ├── run_controlled_ablation.py      # Deterministic ablation runner (--temp 0, repeats)
+│   ├── run_full_3x1k_bench.py          # 3x1K long-generation runner (SLRU cache)
+│   ├── run_full_3x1k_std_bench.py      # 3x1K long-generation runner (Stock Auto-Fit)
+│   ├── plot_benchmarks.py              # Generates docs/assets/benchmark_results.png
+│   ├── plot_nsys_timeline.py           # Generates docs/assets/nsys_timeline.png from nsys SQLite
+│   ├── async_pipeline.cu               # CUDA dual-stream compute/DMA overlap microbenchmark
+│   ├── zero_transfer_ffn.cpp           # CUDA + OpenMP/AVX2 3-matrix SwiGLU expert benchmark
+│   ├── beyond_vram_cache.h             # Reference C++17 SLRU cache header
+│   ├── beyond_vram_cache.cpp           # Reference C++17 SLRU cache implementation
+│   ├── moe_cache.py                    # Synthetic SLRU topic-locality simulator
+│   ├── async_pipeline.py               # Analytical dual-stream latency model
+│   ├── zero_transfer_ffn.py            # Analytical PCIe vs. CPU FFN model
+│   └── benchmark_comparator.py         # Analytical end-to-end throughput & traffic model
+└── tests/
+    └── test_cache.cpp                  # Unit tests for the C++17 SLRU cache
+```
+
+---
+
+## Reproducing Everything
+
+### 1. Parse GGUF Header & Compute Exact VRAM Budget
+```powershell
+python src/header_parser.py --model "C:\path\to\Groot-19B-A3B-261023.i1-Q3_K_S.gguf" --vram-mib 6144 --context-length 131072
+```
+
+### 2. Run End-to-End `llama.cpp` Configurations
+```powershell
+# Fastest Decode (33.83 t/s, 88.9% SLRU Hit Rate, MTP Off, 128K Context)
+llama-cli.exe -m Groot-19B-A3B-261023.i1-Q3_K_S.gguf -c 131072 -fa on -ctk q4_0 -ctv q4_0 -cmoe --moe-cache-mib 3300 --spec-type none
+
+# Tuned Static Baseline (26.05 t/s MTP Off / 20.56 t/s MTP On, 18 Layers GPU, 23 Layers CPU)
+llama-cli.exe -m Groot-19B-A3B-261023.i1-Q3_K_S.gguf -c 131072 -fa on -ctk q4_0 -ctv q4_0 -fit off -ngl 99 -ncmoe 23 --spec-type none
+
+# Reproduce Full Controlled Deterministic Ablation Suite (benchmarks/ablation_results.json)
+python src/run_controlled_ablation.py
+```
+
+### 3. Compile & Run Standalone C++/CUDA Microbenchmarks and Nsight Trace
+```powershell
+# Initialize MSVC + CUDA environment
+cmd /c "call ""C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"" && ^
+  cl /EHsc /O2 /std:c++17 /I src tests\test_cache.cpp src\beyond_vram_cache.cpp /Fe:bin\test_cache.exe && ^
+  nvcc -O3 -arch=sm_86 src\async_pipeline.cu -o bin\async_pipeline.exe && ^
+  nvcc -O3 -x cu -arch=sm_86 -Xcompiler ""/O2 /openmp /arch:AVX2"" src\zero_transfer_ffn.cpp -o bin\bench_zero_transfer.exe"
+
+# Run unit tests and microbenchmarks
+.\bin\test_cache.exe
+.\bin\async_pipeline.exe
+.\bin\bench_zero_transfer.exe
+
+# Profile dual-stream overlap with NVIDIA Nsight Systems and regenerate plots
+& "C:\Program Files\NVIDIA Corporation\Nsight Systems 2025.6.3\target-windows-x64\nsys.exe" profile --trace=cuda --stats=true --force-overwrite=true -o bin\async_pipeline_trace .\bin\async_pipeline.exe
+python src/plot_nsys_timeline.py
+python src/plot_benchmarks.py
 ```
 
 ---
 
 ## License
 
-Apache-2.0 License.
+Released under the [Apache-2.0 License](LICENSE).

@@ -170,16 +170,17 @@ class BeyondVRAMHotCache:
 if __name__ == "__main__":
     import random
 
-    print("=" * 65)
-    print(" BeyondVRAM: Hot Cache (SLRU) Simulation on Groot-19B")
-    print("=" * 65)
+    print("=" * 72)
+    print(" BeyondVRAM: Hot Cache (SLRU) Synthetic Topic-Locality Simulator")
+    print(" (Note: Synthetic model — see benchmarks/ for real llama.cpp telemetry)")
+    print("=" * 72)
 
-    # Groot-19B parameters
+    # Groot-19B-A3B parameters
     NUM_LAYERS = 41
     EXPERTS_PER_LAYER = 128
     TOP_K = 8
-    EXPERT_SIZE_BYTES = int(1.29 * 1024 * 1024)  # ~1.29 MB per expert
-    CACHE_SLOTS = 3100  # 4000 MiB VRAM budget
+    EXPERT_SIZE_BYTES = 1351680  # Exact 1.289 MiB (1,351,680 B) per Q3_K_S expert
+    CACHE_SLOTS = 2560           # 3,300 MiB VRAM cache budget
 
     cache = BeyondVRAMHotCache(
         num_layers=NUM_LAYERS,
@@ -191,12 +192,10 @@ if __name__ == "__main__":
     print(f" Initialized SLRU Cache: {CACHE_SLOTS} slots ({CACHE_SLOTS * EXPERT_SIZE_BYTES / (1024**2):.1f} MiB)")
     print(f" Simulating 100 tokens generation across {NUM_LAYERS} layers (Top-{TOP_K} routing)...")
 
-    # Simulate realistic topic-locality: 30% of experts are cluster favorites
-    # 70% of selections come from a subset of 35 experts per layer
+    # Simulate synthetic topic-locality: 80% of selections drawn from a subset of 35 experts/layer
     random.seed(42)
     for token_idx in range(100):
         for layer_idx in range(NUM_LAYERS):
-            # 80% probability to pick from hot core (experts 0-35), 20% random
             if random.random() < 0.80:
                 selected = random.sample(range(35), TOP_K)
             else:
@@ -204,12 +203,12 @@ if __name__ == "__main__":
             cache.access(layer_idx, selected)
 
     status = cache.get_status()
-    print("-" * 65)
+    print("-" * 72)
     print(f" Total Expert Requests : {status['total_requests']:,}")
-    print(f" Cache Hits (VRAM)     : {status['hits']:,} ({status['hit_rate_pct']}%)")
-    print(f" Cache Misses (RAM)    : {status['misses']:,}")
+    print(f" Simulated Cache Hits  : {status['hits']:,} ({status['hit_rate_pct']}%)")
+    print(f" Simulated Cache Misses: {status['misses']:,}")
     print(f" VRAM Occupancy        : {status['used_slots']} / {status['capacity_slots']} ({status['occupancy_pct']}%)")
     print(f" Protected Hot Experts : {status['protected_count']}")
     print(f" Probationary Experts  : {status['probation_count']}")
-    print(f" PCIe Traffic Saved    : {status['vram_bandwidth_saved_gib']} GiB of PCIe bandwidth avoided!")
-    print("=" * 65)
+    print(f" Simulated Traffic Cut : {status['vram_bandwidth_saved_gib']} GiB of host->GPU uploads avoided")
+    print("=" * 72)

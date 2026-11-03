@@ -1,6 +1,6 @@
 import os
 
-prompts_dir = r"C:\Users\gaurav\bench_1k_prompts"
+prompts_dir = os.path.join("benchmarks", "prompts")
 os.makedirs(prompts_dir, exist_ok=True)
 
 p1 = """You are a distinguished Principal AI Systems Architect, Supercomputing Fellow, and Distributed Infrastructure Lead with extensive industry expertise designing exascale training and inference platforms for multi-trillion-parameter foundation models.

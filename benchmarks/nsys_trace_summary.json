@@ -1,0 +1,174 @@
+{
+  "mode_a_sequential": [
+    {
+      "type": "attn",
+      "stream": 13,
+      "start_us": 0.0,
+      "end_us": 252.29,
+      "dur_us": 252.29
+    },
+    {
+      "type": "ffn",
+      "stream": 13,
+      "start_us": 457.32,
+      "end_us": 468.39,
+      "dur_us": 11.07
+    },
+    {
+      "type": "attn",
+      "stream": 13,
+      "start_us": 470.0,
+      "end_us": 722.13,
+      "dur_us": 252.13
+    },
+    {
+      "type": "ffn",
+      "stream": 13,
+      "start_us": 893.81,
+      "end_us": 904.73,
+      "dur_us": 10.91
+    },
+    {
+      "type": "attn",
+      "stream": 13,
+      "start_us": 906.87,
+      "end_us": 1159.64,
+      "dur_us": 252.77
+    },
+    {
+      "type": "ffn",
+      "stream": 13,
+      "start_us": 1322.82,
+      "end_us": 1333.76,
+      "dur_us": 10.94
+    },
+    {
+      "type": "attn",
+      "stream": 13,
+      "start_us": 1335.33,
+      "end_us": 1588.1,
+      "dur_us": 252.77
+    },
+    {
+      "type": "ffn",
+      "stream": 13,
+      "start_us": 1747.88,
+      "end_us": 1759.24,
+      "dur_us": 11.36
+    },
+    {
+      "type": "dma",
+      "stream": 13,
+      "start_us": 310.95,
+      "end_us": 424.62,
+      "dur_us": 113.67
+    },
+    {
+      "type": "dma",
+      "stream": 13,
+      "start_us": 750.93,
+      "end_us": 864.44,
+      "dur_us": 113.51
+    },
+    {
+      "type": "dma",
+      "stream": 13,
+      "start_us": 1186.01,
+      "end_us": 1296.26,
+      "dur_us": 110.24
+    },
+    {
+      "type": "dma",
+      "stream": 13,
+      "start_us": 1611.97,
+      "end_us": 1721.99,
+      "dur_us": 110.02
+    }
+  ],
+  "mode_b_pipelined": [
+    {
+      "type": "attn",
+      "stream": 13,
+      "start_us": 0.0,
+      "end_us": 264.1,
+      "dur_us": 264.1
+    },
+    {
+      "type": "ffn",
+      "stream": 13,
+      "start_us": 265.61,
+      "end_us": 276.74,
+      "dur_us": 11.14
+    },
+    {
+      "type": "attn",
+      "stream": 13,
+      "start_us": 278.21,
+      "end_us": 542.57,
+      "dur_us": 264.36
+    },
+    {
+      "type": "ffn",
+      "stream": 13,
+      "start_us": 544.05,
+      "end_us": 554.86,
+      "dur_us": 10.82
+    },
+    {
+      "type": "attn",
+      "stream": 13,
+      "start_us": 556.81,
+      "end_us": 821.04,
+      "dur_us": 264.23
+    },
+    {
+      "type": "ffn",
+      "stream": 13,
+      "start_us": 822.48,
+      "end_us": 833.52,
+      "dur_us": 11.04
+    },
+    {
+      "type": "attn",
+      "stream": 13,
+      "start_us": 835.03,
+      "end_us": 1099.32,
+      "dur_us": 264.29
+    },
+    {
+      "type": "ffn",
+      "stream": 13,
+      "start_us": 1100.83,
+      "end_us": 1112.09,
+      "dur_us": 11.27
+    },
+    {
+      "type": "dma",
+      "stream": 14,
+      "start_us": 36.7,
+      "end_us": 149.96,
+      "dur_us": 113.25
+    },
+    {
+      "type": "dma",
+      "stream": 14,
+      "start_us": 316.17,
+      "end_us": 431.18,
+      "dur_us": 115.01
+    },
+    {
+      "type": "dma",
+      "stream": 14,
+      "start_us": 589.04,
+      "end_us": 701.62,
+      "dur_us": 112.58
+    },
+    {
+      "type": "dma",
+      "stream": 14,
+      "start_us": 866.39,
+      "end_us": 977.66,
+      "dur_us": 111.27
+    }
+  ]
+}
