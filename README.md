@@ -207,7 +207,7 @@ BeyondVRAM/
 
 ### 1. Parse GGUF Header & Compute Exact VRAM Budget
 ```powershell
-python src/header_parser.py --model "C:\path\to\Groot-19B-A3B-261023.i1-Q3_K_S.gguf" --vram-mib 6144 --context-length 131072
+python src/header_parser.py --model "C:\path\to\Groot-19B-A3B-261023.i1-Q3_K_S.gguf" --vram 6144 --ctx 131072
 ```
 
 ### 2. Run End-to-End `llama.cpp` Configurations
