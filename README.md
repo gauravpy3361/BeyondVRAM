@@ -69,6 +69,28 @@ Head-to-head empirical comparison on **RTX 3050 (6GB) + Host RAM** with **Multi-
 
 ---
 
+## 10-Question Coding & Agentic Benchmark (128K Context Window)
+
+Real-world test suite across **10 complex coding, distributed systems, and agentic tasks** at a full **131,072 (128K) context window** on an **RTX 3050 6GB Laptop GPU** with **3,300 MiB Hot Cache**:
+
+| ID | Challenge Title | Category & Complexity | Prompt Processing | Decode Speed | Cache Hit Rate | MTP Acceptance |
+| :---: | :--- | :--- | :---: | :---: | :---: | :---: |
+| **Q01** | **LRU Cache (Double-Linked List)** | Coding (Easy) | 11.8 t/s | 17.6 t/s | **83.2%** | 53.0% |
+| **Q02** | **Async Token Bucket Rate Limiter** | Coding (Easy-Med) | 13.3 t/s | 17.8 t/s | **86.5%** | 45.3% |
+| **Q03** | **C++20 PMR Arena Memory Allocator** | Systems (Medium) | 17.7 t/s | 18.4 t/s | **85.8%** | 42.1% |
+| **Q04** | **ReAct Autonomous Tool-Calling Loop** | Agentic Work (Medium) | 15.2 t/s | **21.0 t/s** | **88.1%** | 43.9% |
+| **Q05** | **Raft Leader Election Protocol** | Distributed (Med-Hard) | 15.5 t/s | 17.7 t/s | **85.8%** | 41.0% |
+| **Q06** | **CUDA Fused FlashAttention Kernel** | GPU Systems (Hard) | 17.8 t/s | 17.8 t/s | **85.5%** | 39.0% |
+| **Q07** | **Hierarchical Multi-Agent Swarm** | Agentic Work (Hard) | 9.8 t/s | **22.0 t/s** | **88.5%** | 48.5% |
+| **Q08** | **Tree Speculative Decoding Verifier** | AI Systems (Hard) | 25.5 t/s | **21.1 t/s** | **88.7%** | 34.7% |
+| **Q09** | **Self-Healing CI/CD Autonomous Agent** | Agentic Work (Hard) | **33.1 t/s** | **24.3 t/s** | **89.0%** | 46.9% |
+| **Q10** | **AVX2 4-Bit Dequantization Microkernel**| Compiler / SIMD (Very Hard)| 10.3 t/s | 15.8 t/s | **83.4%** | 45.0% |
+| **AVG** | **Full 10-Question Benchmark Average** | **Suite Runtime: 294.6s** | **17.0 t/s** | **19.4 t/s** | **86.4%** | **43.9%** |
+
+> **VRAM Stability Metric:** 5,779 MiB allocated / 6,143 MiB total (**+364 MiB clean headroom**). Zero out-of-memory errors, zero process crashes, and zero Windows shared-memory thrashing across 2,500 generated tokens.
+
+---
+
 ## The Killer Metric: PCIe Transit Elimination
 
 Standard runtimes bottleneck on PCIe bandwidth, repeatedly dragging the same expert weights from host RAM to VRAM. BeyondVRAM eliminates the vast majority of this physical data travel:
@@ -103,7 +125,9 @@ BeyondVRAM/
     ├── benchmark_comparator.py   # PCIe bus transit & time savings calculator
     ├── run_deep_bench.py         # 3-question deep stress-test runner
     ├── sweep_staging.py          # Hybrid layer staging parameter sweep
-    └── run_hybrid_deep_bench.py  # Hybrid staging (ncmoe 31) 3-question deep stress-test
+    ├── run_hybrid_deep_bench.py  # Hybrid staging (ncmoe 31) 3-question deep stress-test
+    ├── measure_context_scaling.py# 4K to 256K context memory scaling evaluator
+    └── run_10q_benchmark.py      # 10-question coding & agentic benchmark suite
 ```
 
 ---
