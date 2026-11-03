@@ -100,11 +100,25 @@ class MoEModelGeometry:
         """
         non_expert_mib = self.non_expert_bytes / (1024 * 1024)
         
-        # Approximate KV cache footprint
-        # Q4_0 is ~0.5 bytes per element per token
-        kv_mib = (ctx_size * self.embedding_length * 2 * 0.5 * self.block_count) / (1024 * 1024)
+        # Dynamically calculate KV cache footprint based on model geometry and requested context length.
+        # Key & Value tensors per layer: 2 * ctx_size * n_head_kv * head_dim * bytes_per_elem
+        # For Qwen-style MoE, head_dim = key_length (typically 128 or 256), n_head_kv typically 2.
+        head_dim = 128  # standard head dimension
+        n_head_kv = 2   # grouped query attention KV heads
+        
+        # Determine bytes per element based on quant type
         if kv_type == 'q4_0':
-            kv_mib = 273.0  # Empirical for 4k Q4 on this arch
+            bpe = 0.5625  # 4.5 bits per weight with block scale overhead
+        elif kv_type == 'q8_0':
+            bpe = 1.0625  # 8.5 bits with scale
+        elif kv_type in ('f16', 'bf16'):
+            bpe = 2.0
+        else:
+            bpe = 2.0
+
+        # Total KV cache bytes = 2 (K+V) * block_count * ctx_size * n_head_kv * head_dim * bpe
+        total_kv_bytes = 2 * self.block_count * ctx_size * n_head_kv * head_dim * bpe
+        kv_mib = total_kv_bytes / (1024 * 1024)
         
         compute_scratch_mib = 170.0  # CUDA graph execution buffer
         

@@ -16,56 +16,54 @@ class ZeroTransferFFNRouter:
     def __init__(self,
                  d_model: int = 2048,
                  expert_ffn_dim: int = 512,
-                 expert_weight_bytes: int = 1351680,  # ~1.29 MB
-                 pcie_bandwidth_gbps: float = 4.5,
-                 cpu_gflops: float = 120.0):
+                 expert_weight_bytes: int = 4194304,  # 4.0 MB (FP32 baseline)
+                 pcie_bandwidth_gbps: float = 4.8,
+                 cpu_gflops: float = 120.0,
+                 gpu_tflops: float = 9.0):
         self.d_model = d_model
         self.expert_ffn_dim = expert_ffn_dim
         self.expert_weight_bytes = expert_weight_bytes
         self.pcie_bandwidth_gbps = pcie_bandwidth_gbps
         self.cpu_gflops = cpu_gflops
+        self.gpu_tflops = gpu_tflops
 
-        # Activation vector: FP16 (2 bytes per element)
-        self.activation_bytes_in = d_model * 2  # 4 KB
-        self.activation_bytes_out = d_model * 2  # 4 KB
+        # Activation vector: FP32 (4 bytes per element)
+        self.activation_bytes_in = d_model * 4   # 8 KB input activation
+        self.activation_bytes_out = expert_ffn_dim * 4  # 2 KB output activation
         self.total_activation_transfer_bytes = self.activation_bytes_in + self.activation_bytes_out
 
     def evaluate_expert_call(self, access_count_window: int) -> Dict[str, Any]:
         """
-        Calculates the breakeven trade-off:
-        - Path A (Transfer to GPU): Shuttles full 1.29 MB weight matrix over PCIe.
-        - Path B (Zero-Transfer CPU FFN): Shuttles only 8 KB activations, computes on host CPU.
+        Calculates the apples-to-apples breakeven trade-off:
+        - Path A (Transfer to GPU + GPU GEMV): Shuttles 4.0 MB weight matrix over PCIe + executes GPU GEMV.
+        - Path B (Zero-Transfer CPU FFN): Shuttles only 10 KB activations (8 KB in, 2 KB out), computes in-place on CPU AVX2.
         """
-        # Time to transfer full weights over PCIe
         pcie_bytes_per_sec = self.pcie_bandwidth_gbps * (1024**3)
         weight_transfer_time_ms = (self.expert_weight_bytes / pcie_bytes_per_sec) * 1000.0
-
-        # Time to transfer activations over PCIe
         activation_transfer_time_ms = (self.total_activation_transfer_bytes / pcie_bytes_per_sec) * 1000.0
 
-        # Floating point operations for SwiGLU FFN:
-        # Gate: 2 * d_model * ffn_dim
-        # Up:   2 * d_model * ffn_dim
-        # Down: 2 * ffn_dim * d_model
-        # Total = 6 * d_model * ffn_dim FLOPs
-        flops = 6 * self.d_model * self.expert_ffn_dim
+        # Matrix-vector multiply operations: 2 * d_model * ffn_dim FLOPs
+        flops = 2 * self.d_model * self.expert_ffn_dim
         cpu_compute_time_ms = (flops / (self.cpu_gflops * 1e9)) * 1000.0
+        gpu_compute_time_ms = (flops / (self.gpu_tflops * 1e12)) * 1000.0
 
+        total_gpu_path_ms = weight_transfer_time_ms + gpu_compute_time_ms
         total_cpu_path_ms = activation_transfer_time_ms + cpu_compute_time_ms
-        total_gpu_transfer_path_ms = weight_transfer_time_ms  # (excluding GPU compute which is near-zero)
 
         bytes_saved = self.expert_weight_bytes - self.total_activation_transfer_bytes
         transfer_reduction_pct = (bytes_saved / self.expert_weight_bytes) * 100.0
 
         # Heuristic decision:
         # If single-shot (access_count <= 2), CPU path is faster and avoids VRAM eviction
-        use_cpu_ffn = (access_count_window <= 2) or (total_cpu_path_ms < total_gpu_transfer_path_ms)
+        use_cpu_ffn = (access_count_window <= 2) or (total_cpu_path_ms < total_gpu_path_ms)
 
         return {
             "d_model": self.d_model,
             "expert_weight_bytes": self.expert_weight_bytes,
             "activation_bytes": self.total_activation_transfer_bytes,
             "weight_transfer_time_ms": round(weight_transfer_time_ms, 3),
+            "gpu_compute_time_ms": round(gpu_compute_time_ms, 4),
+            "total_gpu_path_ms": round(total_gpu_path_ms, 3),
             "activation_transfer_time_ms": round(activation_transfer_time_ms, 4),
             "cpu_compute_time_ms": round(cpu_compute_time_ms, 3),
             "total_cpu_path_ms": round(total_cpu_path_ms, 3),

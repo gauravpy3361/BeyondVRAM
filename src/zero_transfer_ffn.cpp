@@ -2,15 +2,16 @@
  * BeyondVRAM: Step 3 - Zero-Transfer CPU FFN In-Place Benchmark
  * 
  * Demonstrates the physical latency and bandwidth comparison:
- * - Mode A (Naive Offload): Transfer 1.29 MB expert weights over PCIe to GPU.
- * - Mode B (Zero-Transfer CPU FFN): Keep weights in host RAM, transfer 4 KB
- *   activation token, compute in-place on CPU SIMD, transfer 4 KB result back.
+ * - Mode A (Naive Offload): Transfer expert weights over PCIe to GPU + execute GPU GEMV.
+ * - Mode B (Zero-Transfer CPU FFN): Keep weights in host RAM, transfer 8 KB
+ *   activation token, compute in-place on CPU AVX2, transfer 8 KB result back.
  */
 
 #include <iostream>
 #include <vector>
 #include <chrono>
 #include <cmath>
+#include <numeric>
 #include <immintrin.h>
 #include <cuda_runtime.h>
 
@@ -20,6 +21,20 @@
         std::cerr << "CUDA Error: " << cudaGetErrorString(err) << " at line " << __LINE__ << std::endl; \
         exit(1); \
     } \
+}
+
+// GPU GEMV Kernel: Matrix-vector product y = A * x
+__global__ void gpu_gemv_kernel(const float* __restrict__ A, const float* __restrict__ x, float* __restrict__ y, int rows, int cols) {
+    int r = blockIdx.x * blockDim.x + threadIdx.x;
+    if (r < rows) {
+        float sum = 0.0f;
+        const float* row_ptr = A + r * cols;
+        #pragma unroll 4
+        for (int c = 0; c < cols; ++c) {
+            sum += row_ptr[c] * x[c];
+        }
+        y[r] = sum;
+    }
 }
 
 // In-place CPU Vectorized GEMV (Matrix-Vector multiplication) using AVX2
@@ -69,6 +84,7 @@ int main(int argc, char** argv) {
     const int FFN_DIM = 512;
     const size_t WEIGHT_BYTES = D_MODEL * FFN_DIM * sizeof(float); // ~4.19 MB (FP32 baseline)
     const size_t ACTIVATION_BYTES = D_MODEL * sizeof(float);       // 8 KB (FP32 token)
+    const size_t OUTPUT_BYTES = FFN_DIM * sizeof(float);           // 2 KB
     const int TEST_ITERATIONS = 500;
 
     std::cout << " [*] Expert Matrix Size  : " << (WEIGHT_BYTES / 1024.0) << " KB in Host RAM" << std::endl;
@@ -76,10 +92,11 @@ int main(int argc, char** argv) {
     std::cout << " [*] Test Iterations     : " << TEST_ITERATIONS << " cold expert invocations" << std::endl;
     std::cout << "----------------------------------------------------------" << std::endl;
 
-    // 1. Allocate Host Weights (In-place RAM)
-    std::vector<float> h_weights(D_MODEL * FFN_DIM, 0.05f);
-    std::vector<float> h_activation_in(D_MODEL, 1.0f);
-    std::vector<float> h_activation_out(FFN_DIM, 0.0f);
+    // 1. Allocate & Initialize Host Weights (Deterministic Values)
+    std::vector<float> h_weights(D_MODEL * FFN_DIM);
+    for (size_t i = 0; i < h_weights.size(); ++i) {
+        h_weights[i] = static_cast<float>((i % 100) + 1) * 0.001f;
+    }
 
     // Pinned Host Memory for fast transfers
     void* h_pinned_weight = nullptr;
@@ -87,24 +104,50 @@ int main(int argc, char** argv) {
     void* h_pinned_act_out = nullptr;
     CHECK_CUDA(cudaMallocHost(&h_pinned_weight, WEIGHT_BYTES));
     CHECK_CUDA(cudaMallocHost(&h_pinned_act_in, ACTIVATION_BYTES));
-    CHECK_CUDA(cudaMallocHost(&h_pinned_act_out, ACTIVATION_BYTES));
+    CHECK_CUDA(cudaMallocHost(&h_pinned_act_out, OUTPUT_BYTES));
 
-    // 2. Allocate VRAM Buffers
+    // Copy initialized data into pinned buffers
+    std::memcpy(h_pinned_weight, h_weights.data(), WEIGHT_BYTES);
+    for (int i = 0; i < D_MODEL; ++i) {
+        static_cast<float*>(h_pinned_act_in)[i] = 1.0f + 0.01f * (i % 10);
+    }
+    std::memset(h_pinned_act_out, 0, OUTPUT_BYTES);
+
+    // 2. Allocate & Initialize VRAM Buffers
     void* d_vram_weight = nullptr;
-    void* d_vram_act = nullptr;
+    void* d_vram_act_in = nullptr;
+    void* d_vram_act_out = nullptr;
     CHECK_CUDA(cudaMalloc(&d_vram_weight, WEIGHT_BYTES));
-    CHECK_CUDA(cudaMalloc(&d_vram_act, ACTIVATION_BYTES));
+    CHECK_CUDA(cudaMalloc(&d_vram_act_in, ACTIVATION_BYTES));
+    CHECK_CUDA(cudaMalloc(&d_vram_act_out, OUTPUT_BYTES));
+
+    CHECK_CUDA(cudaMemcpy(d_vram_act_in, h_pinned_act_in, ACTIVATION_BYTES, cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemset(d_vram_act_out, 0, OUTPUT_BYTES));
+
+    cudaStream_t stream;
+    CHECK_CUDA(cudaStreamCreate(&stream));
+
+    // Warmup
+    CHECK_CUDA(cudaMemcpyAsync(d_vram_weight, h_pinned_weight, WEIGHT_BYTES, cudaMemcpyHostToDevice, stream));
+    gpu_gemv_kernel<<<(FFN_DIM + 255) / 256, 256, 0, stream>>>(
+        (const float*)d_vram_weight, (const float*)d_vram_act_in, (float*)d_vram_act_out, FFN_DIM, D_MODEL);
+    CHECK_CUDA(cudaStreamSynchronize(stream));
 
     // ------------------------------------------------------------------------
-    // MODE A: Naive GPU Transfer (Transfer full 4.19 MB weight matrix over PCIe)
+    // MODE A: Naive GPU Transfer + GPU Compute (Full apples-to-apples)
     // ------------------------------------------------------------------------
-    std::cout << " [1/2] Benchmarking Mode A: Naive PCIe Weight Transfer to GPU..." << std::endl;
+    std::cout << " [1/2] Benchmarking Mode A: PCIe Weight Transfer + GPU Compute..." << std::endl;
     auto t0_a = std::chrono::high_resolution_clock::now();
 
     for (int i = 0; i < TEST_ITERATIONS; ++i) {
-        CHECK_CUDA(cudaMemcpy(d_vram_weight, h_pinned_weight, WEIGHT_BYTES, cudaMemcpyHostToDevice));
+        // Step A1: Transfer full 4.19 MB weight matrix over PCIe
+        CHECK_CUDA(cudaMemcpyAsync(d_vram_weight, h_pinned_weight, WEIGHT_BYTES, cudaMemcpyHostToDevice, stream));
+
+        // Step A2: Execute GPU GEMV kernel
+        gpu_gemv_kernel<<<(FFN_DIM + 255) / 256, 256, 0, stream>>>(
+            (const float*)d_vram_weight, (const float*)d_vram_act_in, (float*)d_vram_act_out, FFN_DIM, D_MODEL);
     }
-    CHECK_CUDA(cudaDeviceSynchronize());
+    CHECK_CUDA(cudaStreamSynchronize(stream));
 
     auto t1_a = std::chrono::high_resolution_clock::now();
     double mode_a_total_ms = std::chrono::duration<double, std::milli>(t1_a - t0_a).count();
@@ -117,16 +160,17 @@ int main(int argc, char** argv) {
     auto t0_b = std::chrono::high_resolution_clock::now();
 
     for (int i = 0; i < TEST_ITERATIONS; ++i) {
-        // Step 1: Transfer tiny activation vector from GPU to CPU (8 KB)
-        CHECK_CUDA(cudaMemcpy(h_pinned_act_in, d_vram_act, ACTIVATION_BYTES, cudaMemcpyDeviceToHost));
+        // Step B1: Transfer activation vector from GPU to CPU (8 KB)
+        CHECK_CUDA(cudaMemcpyAsync(h_pinned_act_in, d_vram_act_in, ACTIVATION_BYTES, cudaMemcpyDeviceToHost, stream));
+        CHECK_CUDA(cudaStreamSynchronize(stream));
 
-        // Step 2: Compute in-place on CPU SIMD using AVX2
+        // Step B2: Compute in-place on CPU SIMD using AVX2
         cpu_inplace_gemv_avx2(h_weights.data(), (const float*)h_pinned_act_in, (float*)h_pinned_act_out, FFN_DIM, D_MODEL);
 
-        // Step 3: Transfer tiny result vector back to GPU (8 KB)
-        CHECK_CUDA(cudaMemcpy(d_vram_act, h_pinned_act_out, ACTIVATION_BYTES, cudaMemcpyHostToDevice));
+        // Step B3: Transfer result vector back to GPU (2 KB)
+        CHECK_CUDA(cudaMemcpyAsync(d_vram_act_out, h_pinned_act_out, OUTPUT_BYTES, cudaMemcpyHostToDevice, stream));
+        CHECK_CUDA(cudaStreamSynchronize(stream));
     }
-    CHECK_CUDA(cudaDeviceSynchronize());
 
     auto t1_b = std::chrono::high_resolution_clock::now();
     double mode_b_total_ms = std::chrono::duration<double, std::milli>(t1_b - t0_b).count();
@@ -136,23 +180,25 @@ int main(int argc, char** argv) {
     // REPORT
     // ------------------------------------------------------------------------
     double speedup = mode_a_per_call_ms / mode_b_per_call_ms;
-    double traffic_saved_bytes = (WEIGHT_BYTES - (2 * ACTIVATION_BYTES));
+    double traffic_saved_bytes = (WEIGHT_BYTES - (ACTIVATION_BYTES + OUTPUT_BYTES));
     double traffic_cut_pct = (traffic_saved_bytes / WEIGHT_BYTES) * 100.0;
 
     std::cout << "==========================================================" << std::endl;
     std::cout << "            STEP 3 ZERO-TRANSFER BENCHMARK RESULTS" << std::endl;
     std::cout << "==========================================================" << std::endl;
-    std::cout << " Mode A (Transfer Weights to GPU) : " << mode_a_per_call_ms << " ms / cold call" << std::endl;
-    std::cout << " Mode B (Zero-Transfer CPU FFN)   : " << mode_b_per_call_ms << " ms / cold call" << std::endl;
+    std::cout << " Mode A (Transfer Weights + GPU GEMV) : " << mode_a_per_call_ms << " ms / cold call" << std::endl;
+    std::cout << " Mode B (Zero-Transfer CPU In-Place)  : " << mode_b_per_call_ms << " ms / cold call" << std::endl;
     std::cout << " ---------------------------------------------------------" << std::endl;
-    std::cout << " [*] In-Place Execution Speedup   : " << speedup << "x FASTER than PCIe transfer!" << std::endl;
-    std::cout << " [*] PCIe Data Shuttling Reduced  : " << traffic_cut_pct << "% bus traffic eliminated" << std::endl;
-    std::cout << " [*] Weight Transferred Over Bus  : ZERO BYTES (weights stay in RAM)" << std::endl;
+    std::cout << " [*] In-Place Execution Speedup       : " << speedup << "x FASTER than PCIe transfer + GPU!" << std::endl;
+    std::cout << " [*] PCIe Data Shuttling Reduced      : " << traffic_cut_pct << "% bus traffic eliminated" << std::endl;
+    std::cout << " [*] Weight Transferred Over Bus      : ZERO BYTES (weights stay in RAM)" << std::endl;
     std::cout << "==========================================================" << std::endl;
 
     // Cleanup
+    cudaStreamDestroy(stream);
     cudaFree(d_vram_weight);
-    cudaFree(d_vram_act);
+    cudaFree(d_vram_act_in);
+    cudaFree(d_vram_act_out);
     cudaFreeHost(h_pinned_weight);
     cudaFreeHost(h_pinned_act_in);
     cudaFreeHost(h_pinned_act_out);
