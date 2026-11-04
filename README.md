@@ -1,4 +1,10 @@
-# BeyondVRAM
+<h1 align="center">BeyondVRAM</h1>
+
+<p align="center">
+  <a href="https://github.com/gauravpy3361#engineering-philosophy--transparency-framework">
+    <img src="https://img.shields.io/badge/Authoring-Hybrid_Architecture-0969da?style=flat-square" alt="Authoring: Hybrid Architecture">
+  </a>
+</p>
 
 MoE models are big but only use a few experts per token, so most of their weights sit idle, yet they still have to live somewhere. On a 6 GB GPU, that "somewhere" is slow system RAM.
 
