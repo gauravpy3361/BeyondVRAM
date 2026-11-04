@@ -165,11 +165,7 @@ def main():
         gain = (h / std_vals[idx] - 1.0) * 100.0
         ax2.text(
             bar.get_x() + bar.get_width() / 2.0, h + 0.4,
-            f"{h:.1f}\n(+{gain:.0f}%)", ha="center", va="bottom", color="#79c0ff", fontsize=8.3, fontweight="bold"
-        )
-        ax2.text(
-            bar.get_x() + bar.get_width() / 2.0, h / 2.0,
-            f"{hit_rates[idx]:.1f}%\nhit", ha="center", va="center", color="#ffffff", fontsize=7.8, fontweight="bold"
+            f"{h:.1f}\n(+{gain:.0f}%)", ha="center", va="bottom", color="#79c0ff", fontsize=8.5, fontweight="bold"
         )
 
     ax2.set_xticks(x)

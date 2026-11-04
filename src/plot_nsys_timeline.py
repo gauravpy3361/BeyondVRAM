@@ -96,7 +96,7 @@ def render_timeline(data):
     plt.rcParams["font.sans-serif"] = "Segoe UI"
     plt.rcParams["axes.edgecolor"] = "#333942"
 
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(13, 6.2), dpi=180, sharex=True)
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14.0, 7.2), dpi=180, sharex=True)
     fig.patch.set_facecolor("#14171c")
 
     colors = {
@@ -104,6 +104,31 @@ def render_timeline(data):
         "dma":  "#e68a00",  # PCIe HtoD DMA Copy (1.29 MiB Cold Expert)
         "ffn":  "#31a354",  # Cold Expert SwiGLU Kernel
     }
+
+    # Title, Callout, and Legend at the top (well-spaced and readable)
+    fig.text(
+        0.5, 0.962,
+        "NVIDIA Nsight Systems Hardware Trace: Single-Stream vs. Dual-Stream Overlap",
+        ha="center", va="center", color="#f0f6fc", fontsize=14, fontweight="bold"
+    )
+    fig.text(
+        0.5, 0.925,
+        "Key Insight: Mode B hides the orange PCIe DMA transfer entirely behind the blue compute (0.464 ms → 0.287 ms / step, 1.61x speedup)",
+        ha="center", va="center", color="#79c0ff", fontsize=10.5, fontweight="bold"
+    )
+
+    legend_patches = [
+        mpatches.Patch(color=colors["attn"], label="GPU Compute: Attention + Resident Experts (Stream 13, ~264 µs)"),
+        mpatches.Patch(color=colors["dma"],  label="PCIe 4.0 HtoD DMA: 1.29 MiB Cold Expert (Stream 14, ~116 µs)"),
+        mpatches.Patch(color=colors["ffn"],  label="Cold Expert SwiGLU: Consumes Transferred Weights (~11 µs)"),
+    ]
+    fig.legend(
+        handles=legend_patches, loc="upper center", ncol=3,
+        frameon=True, facecolor="#1b1f26", edgecolor="#30363d",
+        labelcolor="#e6edf3", fontsize=9.5, bbox_to_anchor=(0.5, 0.885)
+    )
+
+    fig.subplots_adjust(top=0.79, bottom=0.10, left=0.12, right=0.97, hspace=0.36)
 
     # --- Panel 1: Mode A (Sequential on Stream 13) ---
     ax1.set_facecolor("#1b1f26")
@@ -161,18 +186,6 @@ def render_timeline(data):
     ax2.grid(axis="x", color="#2d333b", linestyle="--", linewidth=0.7, alpha=0.8)
     ax2.tick_params(colors="#8b949e")
 
-    legend_patches = [
-        mpatches.Patch(color=colors["attn"], label="Attention + Hot Experts Compute (Stream 13, ~256–264 µs)"),
-        mpatches.Patch(color=colors["dma"],  label="PCIe 4.0 HtoD Cold-Expert Weight DMA (1.29 MiB, ~113–116 µs)"),
-        mpatches.Patch(color=colors["ffn"],  label="Cold-Expert SwiGLU Compute (Stream 13, ~11–16 µs, runs after cudaStreamWaitEvent)"),
-    ]
-    fig.legend(
-        handles=legend_patches, loc="upper center", ncol=3,
-        frameon=True, facecolor="#1b1f26", edgecolor="#333942",
-        labelcolor="#e6edf3", fontsize=8.8, bbox_to_anchor=(0.5, 0.99)
-    )
-
-    plt.tight_layout(rect=[0, 0, 1, 0.92])
     plt.savefig(OUT_IMG_PATH, dpi=180, facecolor=fig.get_facecolor())
     print(f"Saved Nsight timeline chart to {OUT_IMG_PATH}")
 

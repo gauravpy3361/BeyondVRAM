@@ -23,7 +23,16 @@ Decode speed (median tok/s), 128K context reserved, ~900-token prompt, 200 gener
 
 **What beats what, and why the baselines matter:** stock `-fit on` leaves about 1 GB of VRAM unused, so it is a weak baseline. Tuning it by hand already gives +39%. The cache is only interesting because it beats the tuned baseline too (+14–17% with MTP on, +30% with MTP off).
 
-Long-generation check (3 prompts × 1000 tokens, default sampling): 15.8 → 23.6 tok/s on average, 267 s → 206 s total. Per-prompt gains ranged from +21% to +67% because sampling was random. Raw data is in [`benchmarks/`](benchmarks/).
+**Long generation (3 prompts × 1000 tokens, default sampling):**
+
+| Workload | Stock `llama.cpp` | BeyondVRAM (3300 MiB) | Decode Speedup | SLRU Hit Rate |
+|---|---:|---:|---:|---:|
+| Q1: Distributed AI | 14.1 tok/s | 23.6 tok/s | +67.4% | 87.8% |
+| Q2: AgentOS Kernel | 14.8 tok/s | 24.8 tok/s | +66.8% | 90.2% |
+| Q3: Compiler & PTX | 18.5 tok/s | 22.4 tok/s | +21.5% | 89.0% |
+| **Suite Mean** | **15.8 tok/s** | **23.6 tok/s** | **+49.3%** | **89.0%** |
+
+Total wall-clock time dropped from 267 s to 206 s (-61 s). Q3 showed lower relative gains because default sampling led to different speculative drafting trajectories. Raw telemetry is in [`benchmarks/`](benchmarks/).
 
 ---
 
@@ -68,8 +77,6 @@ These are small standalone CUDA/C++ tests of the hardware behaviour behind the c
 
 ![Nsight timeline](docs/assets/nsys_timeline.png)
 
-*Nsight Systems timeline: the compute kernel on one stream (top) runs while the 1.29 MiB host-to-device copy runs on a second stream (bottom). The copy is hidden behind compute, and a final small kernel uses the copied weights.*
-
 **2. Cold expert: CPU vs GPU** ([`src/zero_transfer_ffn.cpp`](src/zero_transfer_ffn.cpp)). One full 3-matrix expert at its real size, including the cost of moving activations and syncing:
 
 | Path | Time per expert |
@@ -82,7 +89,26 @@ A cache hit is fastest by far. For a miss, running on the CPU is a little faster
 
 ---
 
+## Related work
+
+MoE offloading and expert caching have been explored by [Mixtral-Offloading](https://arxiv.org/abs/2312.17238) (LRU caching with prefetching), [Fiddler](https://arxiv.org/abs/2402.07033) (computing cold experts on the CPU instead of moving weights), [MoE-Infinity](https://arxiv.org/abs/2401.14361), and [KTransformers](https://github.com/kvcache-ai/ktransformers). BeyondVRAM evaluates how these principles—specifically Segmented-LRU caching and CPU/GPU split execution—behave in upstream `llama.cpp` under consumer mobile constraints (6 GB VRAM, PCIe 4.0 x4, single-channel RAM).
+
+---
+
+## Requirements
+
+- **Operating System:** Windows 10/11 (PowerShell).
+- **Inference Engine:** Upstream [`llama.cpp`](https://github.com/ggml-org/llama.cpp) with `--moe-cache-mib` support (`b1-ac8e169` or newer).
+- **Python:** Python 3.10+ with `matplotlib` and `numpy`.
+- **C++/CUDA Toolchain (optional):** MSVC 19.40+ (Visual Studio 2022) and CUDA Toolkit 12.0+ with `nvcc` (only needed for microbenchmarks).
+- **Model File:** A GGUF MoE model (benchmarked on `Groot-19B-A3B-261023.i1-Q3_K_S.gguf`, 7.82 GiB).
+
+---
+
 ## Quick start
+
+> [!NOTE]
+> Currently Windows-only (MSVC + CUDA Toolkit required for C++/CUDA tests).
 
 ```powershell
 git clone https://github.com/gauravpy3361/BeyondVRAM.git
@@ -102,7 +128,6 @@ Needs a `llama.cpp` build that has `--moe-cache-mib`. `--spec-type none` turns M
 ## Reproduce the benchmarks
 
 ```powershell
-pip install matplotlib
 $env:LLAMA_CLI_PATH = "C:\path\to\llama-cli.exe"
 $env:BEYONDVRAM_MODEL = "C:\path\to\model.gguf"
 
