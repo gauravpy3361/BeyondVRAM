@@ -1,14 +1,51 @@
 # BeyondVRAM
 
-Run a 19B Mixture-of-Experts model with a 128K context on a **6 GB laptop GPU**, and make it faster by keeping the most-used experts in VRAM.
+MoE models are big but only use a few experts per token, so most of their weights sit idle, yet they still have to live somewhere. On a 6 GB GPU, that "somewhere" is slow system RAM.
 
-This repo has the benchmarks, a GGUF memory calculator, and small CUDA/C++ experiments. The inference itself is done by upstream [llama.cpp](https://github.com/ggml-org/llama.cpp).
+**Core insight:** expert use is skewed. A cache holding only **49%** of all experts serves about **89%** of expert requests from VRAM, so an SLRU (segmented LRU) expert cache works.
+
+**Result:** **33.8 tok/s** decoding a 19B MoE model (Groot-19B-A3B, `Q3_K_S`) with a 128K context on a 6 GB RTX 3050 laptop GPU. That is 2.3x stock `llama.cpp` and 30% faster than a hand-tuned static baseline.
 
 ![Benchmark results](docs/assets/benchmark_results.png)
 
 ---
 
-## 1. Hardware
+## Results
+
+Decode speed (median tok/s), 128K context reserved, ~900-token prompt, 200 generated tokens, greedy (`--temp 0`), 2–3 runs each.
+
+| Setup | MTP on | MTP off | Cache hit rate |
+|---|---:|---:|---:|
+| Stock `llama.cpp` (`-fit on`) | 14.8 | – | – |
+| Hand-tuned static (`--n-cpu-moe 23`) | 20.6 | 26.1 | – |
+| BeyondVRAM, 3300 MiB cache | 23.4 | **33.8** | ~89% |
+| BeyondVRAM, hybrid (static + 1650 MiB cache) | **24.0** | – | 75% |
+
+**What beats what, and why the baselines matter:** stock `-fit on` leaves about 1 GB of VRAM unused, so it is a weak baseline. Tuning it by hand already gives +39%. The cache is only interesting because it beats the tuned baseline too (+14–17% with MTP on, +30% with MTP off).
+
+Long-generation check (3 prompts × 1000 tokens, default sampling): 15.8 → 23.6 tok/s on average, 267 s → 206 s total. Per-prompt gains ranged from +21% to +67% because sampling was random. Raw data is in [`benchmarks/`](benchmarks/).
+
+---
+
+## How it works
+
+**The model.** Groot-19B-A3B has 41 MoE layers with 128 experts each (5,248 in total). Each token uses only 8 experts per layer. About 1 GB (attention, routers) is needed every token. The other 6.6 GB is experts, and each expert is 1.29 MiB.
+
+**Why stock `llama.cpp` leaves VRAM idle.** `-fit on` decides per layer: a layer's experts are either all in VRAM or all in RAM. It also keeps a 1 GB safety margin. On this card it fits only 7 layers' experts and runs the rest on the CPU. Most of the VRAM that holds experts is holding ones that are rarely used.
+
+**How the SLRU cache fills the gap.** Instead of whole layers, we keep the backbone and the 128K context in VRAM (~2.5 GB) and use ~3.3 GB as a pool of individual expert slots (2,560 slots).
+- Expert in the pool → used directly on the GPU.
+- Expert missing → copied from RAM into a slot.
+- New experts go into a "probation" segment. A second hit promotes them to a "protected" segment, so one-off experts don't push out the regulars.
+- Prompt prefill does not touch the cache, so a long prompt cannot flush it.
+
+**The locality observation (the thesis).** With slots for only 48.8% of experts, the measured hit rate is 89% (88.9% with MTP off, 89.8% with MTP on). That is only possible if a small set of experts handles most of the requests. We observed this through the hit rate in `llama.cpp` logs, not by analyzing per-expert statistics directly.
+
+The cache is the `--moe-cache-mib` feature already in upstream `llama.cpp`. This repo measures it against fair baselines and adds a memory calculator and microbenchmarks.
+
+---
+
+## Hardware & setup
 
 | | |
 |---|---|
@@ -16,124 +53,128 @@ This repo has the benchmarks, a GGUF memory calculator, and small CUDA/C++ exper
 | CPU | Intel Core 5 210H, 12 threads, AVX2 |
 | RAM | 16 GB DDR4 (single channel) |
 | OS | Windows 11 |
-| Software | llama.cpp `b1-ac8e169`, CUDA 13.2, MSVC 19.44 |
+| Software | `llama.cpp` `b1-ac8e169`, CUDA 13.2, MSVC 19.44, Nsight Systems 2025.6.3 |
+| Model | `Groot-19B-A3B-261023.i1-Q3_K_S.gguf` (7.82 GiB) |
 
-## 2. Model and how it runs
+VRAM use with the full cache: 5,779 of 6,143 MiB. This leaves a small margin so Windows does not spill into shared memory.
 
-**Model:** Groot-19B-A3B, `Q3_K_S` GGUF (7.8 GB). It is a Mixture-of-Experts model. It has 41 layers with 128 experts each, but only 8 experts are used per token (about 2.4B active parameters out of 19.4B).
+---
 
-**Standard llama.cpp (`-fit on`):** it guesses how many layers fit on the GPU and runs the rest on the CPU. On this card it only fits the experts of 7 layers, and the rest run on the CPU.
+## Microbenchmark findings
 
-**With BeyondVRAM:**
-- The small, always-needed parts (attention, routers, 1 GB) stay in VRAM.
-- All experts stay in system RAM.
-- About 3.3 GB of VRAM is used as a **cache of recently used experts**. If an expert is in the cache, the GPU uses it directly. If not, it is loaded from RAM.
-- Cache policy is SLRU (a smarter LRU that keeps experts used more than once).
+These are small standalone CUDA/C++ tests of the hardware behaviour behind the cache. They are separate from the end-to-end numbers above.
 
-The cache itself is the `--moe-cache-mib` option already in llama.cpp. This repo measures it against fair baselines.
-
-## 3. Benchmarks
-
-Setup: 128K context reserved, ~900-token prompt, greedy decoding (`--temp 0`), 2–3 runs each. Numbers are the median decode speed.
-
-**Main comparison (speculative MTP on):**
-
-| Setup | Decode speed | Cache hit rate |
-|---|---:|---:|
-| Standard llama.cpp (`-fit on`) | 14.8 tok/s | – |
-| Hand-tuned static (`--n-cpu-moe 23`) | 20.6 tok/s | – |
-| BeyondVRAM, full cache (3300 MiB) | 23.4 tok/s | 89.8% |
-| BeyondVRAM, hybrid (static + 1650 MiB cache) | 24.0 tok/s | 75.4% |
-
-**Best result (MTP off):**
-
-| Setup | Decode speed | Cache hit rate |
-|---|---:|---:|
-| Hand-tuned static (`--n-cpu-moe 23`) | 26.1 tok/s | – |
-| BeyondVRAM, full cache (3300 MiB) | **33.8 tok/s** | 88.9% |
-
-**Long generation (3 prompts, 1000 tokens each, default sampling):**
-
-| | Standard | BeyondVRAM |
-|---|---:|---:|
-| Average decode | 15.8 tok/s | 23.6 tok/s |
-| Total time | 267 s | 206 s |
-
-Raw data is in [`benchmarks/`](benchmarks/).
-
-**GPU overlap test.** In a small CUDA test, copying an expert over PCIe while the GPU computes cut one step from 0.464 ms to 0.287 ms (1.61x). It was profiled with Nsight Systems:
+**1. Copy/compute overlap** ([`src/async_pipeline.cu`](src/async_pipeline.cu)). Fetching a 1.29 MiB expert over PCIe on one CUDA stream while the GPU computes on another cut a step from **0.464 ms to 0.287 ms (1.61x)**. The compute kernel really uses the copied expert, and the outputs match the sequential version exactly.
 
 ![Nsight timeline](docs/assets/nsys_timeline.png)
 
-## 4. What the results mean
+*Nsight Systems timeline: the compute kernel on one stream (top) runs while the 1.29 MiB host-to-device copy runs on a second stream (bottom). The copy is hidden behind compute, and a final small kernel uses the copied weights.*
 
-- **Standard `-fit on` is not a fair baseline.** It leaves about 1 GB of VRAM unused. Tuning it by hand (`--n-cpu-moe 23`) already gives +39%. Our cache has to beat that, and it does, by 14–30%.
-- **Why the cache helps.** About 89% of expert requests are found in VRAM, so most of the work avoids slow RAM and PCIe.
-- **Why MTP off is faster here.** MTP checks 4 tokens at once, which touches many more experts, and only about 35–45% of its guesses are accepted. On this hardware the extra expert loading costs more than it gains.
-- **Prefill is slower with the cache** (about 220–260 tok/s vs 310–350 tok/s for static). The cache is tuned for generation speed, not prompt reading.
-- **Limits.** One machine, one model, and few repeats. The 3×1K test used random sampling, so its per-prompt gains vary (+21% to +67%). Treat these as measurements on this setup, not general claims.
-- **Cold expert test.** For an expert not in VRAM, running it on the CPU (0.148 ms) is a bit faster than copying it to the GPU (0.193 ms). A cache hit on the GPU is fastest (0.052 ms).
-- **Related work:** [Mixtral-Offloading](https://arxiv.org/abs/2312.17238), [Fiddler](https://arxiv.org/abs/2402.07033), [MoE-Infinity](https://arxiv.org/abs/2401.14361), [KTransformers](https://github.com/kvcache-ai/ktransformers) explore the same idea.
+**2. Cold expert: CPU vs GPU** ([`src/zero_transfer_ffn.cpp`](src/zero_transfer_ffn.cpp)). One full 3-matrix expert at its real size, including the cost of moving activations and syncing:
 
-More detail is in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+| Path | Time per expert |
+|---|---:|
+| GPU, expert already in cache | 0.052 ms |
+| CPU (AVX2), send only 16 KiB of activations | 0.148 ms |
+| Copy 1.29 MiB to GPU, then compute | 0.193 ms |
 
-## 5. Project structure
+A cache hit is fastest by far. For a miss, running on the CPU is a little faster than copying the expert, but about a third of that time is GPU↔CPU sync. This is why the hit rate drives the end-to-end speed.
 
-```text
-BeyondVRAM/
-├── README.md
-├── docs/
-│   ├── ARCHITECTURE.md          # detailed memory and cache notes
-│   └── assets/                  # charts used in this README
-├── benchmarks/
-│   ├── ablation_results.json    # main comparison (temp 0, repeats)
-│   ├── results_3x1k*.json       # long-generation runs
-│   ├── nsys_trace_summary.json  # Nsight data
-│   └── prompts/                 # benchmark prompts
-├── src/
-│   ├── header_parser.py         # reads GGUF, calculates VRAM budget
-│   ├── run_controlled_ablation.py   # runs the main comparison
-│   ├── run_full_3x1k_*.py       # runs the long-generation tests
-│   ├── plot_*.py                # make the charts
-│   ├── async_pipeline.cu        # CUDA copy/compute overlap test
-│   ├── zero_transfer_ffn.cpp    # CPU vs GPU cold-expert test
-│   ├── beyond_vram_cache.*      # C++ SLRU cache reference
-│   └── *.py (moe_cache, ...)    # simple simulators / models
-└── tests/test_cache.cpp         # cache unit tests
-```
+---
 
-## 6. Download and use
-
-**Requirements:** Windows, Python 3.10+, `matplotlib`, a recent llama.cpp build with `--moe-cache-mib`, and the GGUF model. CUDA Toolkit + MSVC are only needed for the C++/CUDA tests.
+## Quick start
 
 ```powershell
 git clone https://github.com/gauravpy3361/BeyondVRAM.git
 cd BeyondVRAM
-```
 
-**Check how much cache fits your GPU:**
-```powershell
+# 1. How big can the cache be on your GPU?
 python src/header_parser.py --model "C:\path\to\model.gguf" --vram 6144 --ctx 131072
+
+# 2. Run with the cache (use the cache size from step 1)
+llama-cli.exe -m "C:\path\to\model.gguf" -c 131072 -fa on -ctk q4_0 -ctv q4_0 -cmoe --moe-cache-mib 3300 --spec-type none
 ```
 
-**Run the model with the expert cache:**
+Needs a `llama.cpp` build that has `--moe-cache-mib`. `--spec-type none` turns MTP off, which was fastest in our tests.
+
+---
+
+## Reproduce the benchmarks
+
 ```powershell
-llama-cli.exe -m model.gguf -c 131072 -fa on -ctk q4_0 -ctv q4_0 -cmoe --moe-cache-mib 3300 --spec-type none
+pip install matplotlib
+$env:LLAMA_CLI_PATH = "C:\path\to\llama-cli.exe"
+$env:BEYONDVRAM_MODEL = "C:\path\to\model.gguf"
+
+python src/run_controlled_ablation.py     # main table, ~10 min, writes benchmarks/ablation_results.json
+python src/run_full_3x1k_std_bench.py     # long-generation run, stock
+python src/run_full_3x1k_bench.py         # long-generation run, with cache
+python src/plot_benchmarks.py             # redraws docs/assets/benchmark_results.png
 ```
 
-**Reproduce the benchmarks** (set `LLAMA_CLI_PATH` and `BEYONDVRAM_MODEL` first):
-```powershell
-python src/run_controlled_ablation.py
-python src/plot_benchmarks.py
-```
+Close other GPU apps first and let the laptop cool between runs. Results will differ on other hardware.
 
-**Build and run the C++/CUDA tests** (from a "x64 Native Tools" prompt):
+---
+
+## Build the C++/CUDA tests
+
+Open an "x64 Native Tools Command Prompt for VS" with CUDA installed. Change `sm_86` to match your GPU (RTX 3050 = `sm_86`).
+
 ```powershell
 cl /EHsc /O2 /std:c++17 /I src tests\test_cache.cpp src\beyond_vram_cache.cpp /Fe:bin\test_cache.exe
 nvcc -O3 -arch=sm_86 src\async_pipeline.cu -o bin\async_pipeline.exe
 nvcc -O3 -x cu -arch=sm_86 -Xcompiler "/O2 /openmp /arch:AVX2" src\zero_transfer_ffn.cpp -o bin\bench_zero_transfer.exe
-.\bin\test_cache.exe; .\bin\async_pipeline.exe; .\bin\bench_zero_transfer.exe
+
+.\bin\test_cache.exe
+.\bin\async_pipeline.exe
+.\bin\bench_zero_transfer.exe
 ```
-Use `-arch=sm_XX` that matches your GPU (RTX 3050 = `sm_86`).
+
+Optional profiling: `nsys profile --trace=cuda -o bin\async_pipeline_trace .\bin\async_pipeline.exe`, then `python src/plot_nsys_timeline.py`.
+
+---
+
+## Project structure
+
+```text
+BeyondVRAM/
+├── README.md
+├── LICENSE
+├── docs/
+│   ├── ARCHITECTURE.md              # detailed memory and cache notes
+│   └── assets/                      # charts used here
+├── benchmarks/
+│   ├── ablation_results.json        # main comparison
+│   ├── results_3x1k*.json           # long-generation runs
+│   ├── nsys_trace_summary.json      # Nsight data
+│   └── prompts/                     # benchmark prompts
+├── src/
+│   ├── header_parser.py             # reads GGUF, computes VRAM budget
+│   ├── run_controlled_ablation.py   # main benchmark runner
+│   ├── run_full_3x1k_*.py           # long-generation runners
+│   ├── plot_*.py                    # chart scripts
+│   ├── async_pipeline.cu            # copy/compute overlap test
+│   ├── zero_transfer_ffn.cpp        # CPU vs GPU cold-expert test
+│   ├── beyond_vram_cache.{h,cpp}    # C++ SLRU reference implementation
+│   └── moe_cache.py, async_pipeline.py, zero_transfer_ffn.py, benchmark_comparator.py
+│                                    # simple Python simulators / models (not measurements)
+└── tests/test_cache.cpp             # cache unit tests
+```
+
+---
+
+## Limitations & honest caveats
+
+- **We did not write the cache.** The SLRU cache is `--moe-cache-mib` in upstream `llama.cpp`. The C++ cache in this repo is a standalone reference with unit tests and is not used in the benchmarks.
+- **Small sample.** One machine, one model, one prompt for the main table, and 2–3 runs per setting. The reported ranges are small, but this is not a statistical study.
+- **The headline number needs MTP off.** With MTP on (the default for this model) the best result is 24.0 tok/s. 33.8 tok/s is with `--spec-type none`.
+- **The baseline matters.** The 2.3x figure is against stock `-fit on`. Against a hand-tuned static setup, the gain is +30% (MTP off) or +14–17% (MTP on).
+- **Prefill is slower with the cache** (about 220–260 tok/s vs 310–350 tok/s for static). The cache optimizes generation, not prompt reading.
+- **Locality is inferred, not measured directly.** It comes from hit rates in the logs on a few technical prompts. Other kinds of text may behave differently.
+- **Long-generation test is noisy.** Default random sampling changed how many speculative tokens were accepted, so the +21% to +67% spread is partly noise.
+- **128K means reserved, not used.** The tests used ~900-token prompts and up to 1000 generated tokens. Behaviour with a truly full 128K context was not measured.
+- **Microbenchmarks are not end-to-end.** They test single experts in isolation and do not include the real `llama.cpp` scheduling.
+- **Python files marked as simulators are models,** not measurements. The synthetic hit rate in `moe_cache.py` is a made-up distribution.
+- **Hardware specific.** Results are for a laptop with single-channel RAM and PCIe 4.0 x4. A desktop GPU or dual-channel RAM would shift the numbers.
 
 License: [Apache-2.0](LICENSE)
