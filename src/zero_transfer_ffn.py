@@ -1,107 +1,88 @@
 """
-BeyondVRAM: Step 3 - Zero-Transfer CPU FFN & Asymmetric Execution Engine
-Simulates in-place host RAM FFN execution for single-shot cold experts,
-eliminating weight transfer across PCIe and exchanging only activation vectors.
+BeyondVRAM: Step 3 - Analytical Model of Cold-Expert Execution Paths
+Models the latency & PCIe bandwidth trade-offs across three execution paths for
+a Groot-19B-A3B 3-matrix SwiGLU expert (1.29 MiB Q3_K):
+  - Path 0: GPU SLRU Cache Hit (0 B PCIe transfer, warp-parallel GPU SwiGLU)
+  - Path A: Cold Miss via PCIe Weight Upload (1.29 MiB H2D) + GPU SwiGLU
+  - Path B: Cold Miss via In-Place CPU AVX2 SwiGLU + 16 KiB Activation Roundtrip & Sync
 """
 
-import sys
-from typing import Dict, Any, List
+from typing import Dict, Any
 
 
 class ZeroTransferFFNRouter:
     """
-    Asymmetric Hybrid Dispatcher:
-    Decides whether an expert call warrants VRAM promotion or in-place CPU execution.
+    Analytical latency & bus-traffic model parameterized by measured RTX 3050 +
+    Core 5 210H microbenchmark constants (see `src/zero_transfer_ffn.cpp`).
     """
-    def __init__(self,
-                 d_model: int = 2048,
-                 expert_ffn_dim: int = 512,
-                 expert_weight_bytes: int = 1351680,  # ~1.29 MB
-                 pcie_bandwidth_gbps: float = 4.5,
-                 cpu_gflops: float = 120.0):
+
+    def __init__(
+        self,
+        d_model: int = 2048,
+        expert_ffn_dim: int = 512,
+        expert_weight_bytes: int = 1351680,  # 1.289 MiB (Q3_K 3-matrix SwiGLU expert)
+        pcie_h2d_ms_per_expert: float = 0.114,
+        gpu_swiglu_ms_per_expert: float = 0.042,
+        cpu_avx2_ms_per_expert: float = 0.086,
+        gpu_cpu_sync_roundtrip_ms: float = 0.100,
+    ):
         self.d_model = d_model
         self.expert_ffn_dim = expert_ffn_dim
         self.expert_weight_bytes = expert_weight_bytes
-        self.pcie_bandwidth_gbps = pcie_bandwidth_gbps
-        self.cpu_gflops = cpu_gflops
+        self.pcie_h2d_ms = pcie_h2d_ms_per_expert
+        self.gpu_swiglu_ms = gpu_swiglu_ms_per_expert
+        self.cpu_avx2_ms = cpu_avx2_ms_per_expert
+        self.sync_roundtrip_ms = gpu_cpu_sync_roundtrip_ms
 
-        # Activation vector: FP16 (2 bytes per element)
-        self.activation_bytes_in = d_model * 2  # 4 KB
-        self.activation_bytes_out = d_model * 2  # 4 KB
-        self.total_activation_transfer_bytes = self.activation_bytes_in + self.activation_bytes_out
+        self.activation_bytes_in = d_model * 4   # 8 KiB FP32 input
+        self.activation_bytes_out = d_model * 4  # 8 KiB FP32 output
+        self.total_activation_bytes = self.activation_bytes_in + self.activation_bytes_out
 
-    def evaluate_expert_call(self, access_count_window: int) -> Dict[str, Any]:
+    def evaluate_layer_misses(self, k_misses: int = 1) -> Dict[str, Any]:
         """
-        Calculates the breakeven trade-off:
-        - Path A (Transfer to GPU): Shuttles full 1.29 MB weight matrix over PCIe.
-        - Path B (Zero-Transfer CPU FFN): Shuttles only 8 KB activations, computes on host CPU.
+        Evaluates total latency for `k_misses` cold experts in a layer:
+        - Path 0 (If all were GPU Cache Hits): k * gpu_swiglu_ms
+        - Path A (Upload k experts to GPU + GPU SwiGLU): k * (pcie_h2d_ms + gpu_swiglu_ms)
+        - Path B (1 activation roundtrip sync + k experts computed in-place on CPU):
+          sync_roundtrip_ms + k * cpu_avx2_ms
         """
-        # Time to transfer full weights over PCIe
-        pcie_bytes_per_sec = self.pcie_bandwidth_gbps * (1024**3)
-        weight_transfer_time_ms = (self.expert_weight_bytes / pcie_bytes_per_sec) * 1000.0
+        gpu_hit_total_ms = k_misses * self.gpu_swiglu_ms
+        path_a_total_ms = k_misses * (self.pcie_h2d_ms + self.gpu_swiglu_ms)
+        path_b_total_ms = self.sync_roundtrip_ms + (k_misses * self.cpu_avx2_ms)
 
-        # Time to transfer activations over PCIe
-        activation_transfer_time_ms = (self.total_activation_transfer_bytes / pcie_bytes_per_sec) * 1000.0
-
-        # Floating point operations for SwiGLU FFN:
-        # Gate: 2 * d_model * ffn_dim
-        # Up:   2 * d_model * ffn_dim
-        # Down: 2 * ffn_dim * d_model
-        # Total = 6 * d_model * ffn_dim FLOPs
-        flops = 6 * self.d_model * self.expert_ffn_dim
-        cpu_compute_time_ms = (flops / (self.cpu_gflops * 1e9)) * 1000.0
-
-        total_cpu_path_ms = activation_transfer_time_ms + cpu_compute_time_ms
-        total_gpu_transfer_path_ms = weight_transfer_time_ms  # (excluding GPU compute which is near-zero)
-
-        bytes_saved = self.expert_weight_bytes - self.total_activation_transfer_bytes
-        transfer_reduction_pct = (bytes_saved / self.expert_weight_bytes) * 100.0
-
-        # Heuristic decision:
-        # If single-shot (access_count <= 2), CPU path is faster and avoids VRAM eviction
-        use_cpu_ffn = (access_count_window <= 2) or (total_cpu_path_ms < total_gpu_transfer_path_ms)
+        weight_bytes_moved = k_misses * self.expert_weight_bytes
+        bytes_saved = weight_bytes_moved - self.total_activation_bytes
+        transfer_reduction_pct = (bytes_saved / weight_bytes_moved) * 100.0
 
         return {
-            "d_model": self.d_model,
-            "expert_weight_bytes": self.expert_weight_bytes,
-            "activation_bytes": self.total_activation_transfer_bytes,
-            "weight_transfer_time_ms": round(weight_transfer_time_ms, 3),
-            "activation_transfer_time_ms": round(activation_transfer_time_ms, 4),
-            "cpu_compute_time_ms": round(cpu_compute_time_ms, 3),
-            "total_cpu_path_ms": round(total_cpu_path_ms, 3),
-            "bytes_saved_per_call": bytes_saved,
+            "k_misses": k_misses,
+            "weight_bytes_moved": weight_bytes_moved,
+            "activation_bytes_moved": self.total_activation_bytes,
+            "gpu_hit_total_ms": round(gpu_hit_total_ms, 3),
+            "path_a_upload_gpu_ms": round(path_a_total_ms, 3),
+            "path_b_cpu_inplace_ms": round(path_b_total_ms, 3),
             "transfer_reduction_pct": round(transfer_reduction_pct, 2),
-            "recommended_dispatch": "CPU_IN_PLACE" if use_cpu_ffn else "VRAM_HOT_PROMOTION",
-            "traffic_compression_ratio": round(self.expert_weight_bytes / self.total_activation_transfer_bytes, 1)
+            "faster_cold_path": "CPU_IN_PLACE" if path_b_total_ms < path_a_total_ms else "GPU_CACHE_UPLOAD",
         }
 
-    def print_analysis(self, report: Dict[str, Any]):
-        print("=" * 65)
-        print(" BeyondVRAM: Step 3 Zero-Transfer CPU FFN Decision Matrix")
-        print("=" * 65)
-        print(f" Activation Vector Size   : {report['activation_bytes']:,} bytes (2 x {self.d_model} FP16)")
-        print(f" Expert Weight Matrix Size : {report['expert_weight_bytes']:,} bytes (~1.29 MB)")
-        print("-" * 65)
-        print(" Bus Transfer Comparison (PCIe 4.0 x4):")
-        print(f"  * Traditional Offload  : {report['expert_weight_bytes']:,} bytes moved per cold call")
-        print(f"  * Zero-Transfer CPU FFN: {report['activation_bytes']:,} bytes moved per cold call")
-        print(f"  * Data Transit Cut     : {report['transfer_reduction_pct']}% REDUCTION in bus traffic!")
-        print(f"  * Compression Ratio    : {report['traffic_compression_ratio']}x less data over PCIe")
-        print("-" * 65)
-        print(" Latency Breakdown:")
-        print(f"  * Shuttling Weight to GPU : {report['weight_transfer_time_ms']} ms (PCIe bus bottleneck)")
-        print(f"  * Sending Activation Only : {report['activation_transfer_time_ms']} ms")
-        print(f"  * In-Place CPU SIMD Math  : {report['cpu_compute_time_ms']} ms")
-        print(f"  * Total CPU In-Place Path : {report['total_cpu_path_ms']} ms")
-        print("-" * 65)
-        print(f" [*] DISPATCH DECISION    : >>> {report['recommended_dispatch']} <<<")
-        print(f" [*] WHY IT WINS          : Computing in host RAM is {report['weight_transfer_time_ms'] / report['total_cpu_path_ms']:.2f}x faster")
-        print(f"                            than wasting {report['weight_transfer_time_ms']} ms transferring the weights!")
-        print("=" * 65)
+    def print_analysis(self):
+        print("=" * 72)
+        print(" BeyondVRAM: Step 3 Cold-Expert Analytical Model (Calibrated to Hardware)")
+        print("=" * 72)
+        print(f" Expert Footprint (Q3_K 3-Matrix SwiGLU) : {self.expert_weight_bytes:,} bytes (1.29 MiB)")
+        print(f" Activation Roundtrip (D2H + H2D)        : {self.total_activation_bytes:,} bytes (16.0 KiB)")
+        print("-" * 72)
+        print(f" {'Cold Misses/Layer':<18} | {'GPU Cache Hit':<14} | {'Path A (H2D+GPU)':<16} | {'Path B (CPU+Sync)':<17} | {'Winner'}")
+        print("-" * 72)
+        for k in [1, 2, 4, 8]:
+            r = self.evaluate_layer_misses(k)
+            print(
+                f" k = {k:<14} | {r['gpu_hit_total_ms']:>9.3f} ms   | "
+                f"{r['path_a_upload_gpu_ms']:>11.3f} ms   | {r['path_b_cpu_inplace_ms']:>12.3f} ms   | {r['faster_cold_path']}"
+            )
+        print("=" * 72)
 
 
 if __name__ == "__main__":
-    dispatcher = ZeroTransferFFNRouter()
-    # Evaluate for a single-shot cold expert
-    analysis = dispatcher.evaluate_expert_call(access_count_window=1)
-    dispatcher.print_analysis(analysis)
+    router = ZeroTransferFFNRouter()
+    router.print_analysis()
