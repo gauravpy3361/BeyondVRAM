@@ -1,0 +1,24 @@
+You are a Principal Operating Systems Architect and Autonomous Agent Systems Fellow specializing in the design, runtime verification, sandboxed isolation, and high-concurrency orchestration of autonomous multi-agent operating systems.
+
+Please provide an exhaustive, authoritative, deeply technical systems architecture blueprint for an enterprise-scale Autonomous Agent Operating System (AgentOS) designed to supervise, schedule, isolate, and orchestrate thousands of concurrent, autonomous reasoning agents executing complex multi-step software engineering, data analysis, and infrastructure remediation workflows.
+
+In your architectural blueprint, thoroughly address each of the following core operating system domains:
+
+1. Kernel Architecture, Process Abstractions, and Lifecycle Management:
+- Define the core "Agent Process" abstraction (Agent Control Block / ACB). Detail the exact state transition diagram (Ready, Executing, Waiting_for_Tool, Blocked_on_Human, Paged_Out, Terminated, Deadlocked). Detail the registers, stack frames, scratchpad memory states, and dynamic capability tokens tracked inside each ACB.
+- Preemptive Agent Scheduling: Design a priority-based, fair-share scheduling algorithm (e.g., Multi-Level Feedback Queue with Token-Budget Decay) that schedules compute turns, context-window allowances, and API rate limits across heterogeneous agents. Formulate how priority inversion is prevented when a high-priority supervisor agent waits on a dependency produced by a low-priority research worker agent.
+- Inter-Agent Communication (IAC) & Message Bus: Architect an asynchronous, high-throughput message-passing fabric. Contrast direct memory-mapped ring buffers for local co-located agents with zero-copy distributed message brokers (gRPC over shared memory, eBPF socket filters, or Kafka/NATS streams). Detail the message serialization format, type-safe schema contracts, and backpressure mechanisms when workers overwhelm supervisor queues.
+
+2. Hierarchical Multi-Agent Orchestration & DAG Task Execution:
+- Dynamic Task Decomposition: Formulate the mathematical and algorithmic engine used by the Supervisor Agent to decompose arbitrary natural language requests into Directed Acyclic Graphs (DAGs) of discrete subtasks. Formulate cycle detection, topological sorting, dynamic parallel branch execution, and runtime graph mutation when intermediate tasks fail or yield unexpected discovery tokens.
+- Deadlock Detection & Consensus in Swarms: Formalize the deadlock conditions (Mutual Exclusion, Hold and Wait, No Preemption, Circular Wait) in autonomous multi-agent interactions when agents compete for exclusive workspace locks, database tables, or API quotas. Implement a Banker's Algorithm or dynamic dependency graph wait-for graph cycle analyzer to resolve distributed agent deadlocks.
+
+3. Memory Disaggregation, Context Compaction, and Virtual Paging:
+- Hierarchical Agent Memory Architecture: Detail the multi-tiered memory hierarchy spanning L1 Working Context (active prompt/response window), L2 Persistent Session Scratchpad (key-value vector memory), and L3 Long-Term Cold Storage (distributed vector graph database with episodic memory indexing).
+- Dynamic Context Paging & Working Set Maintenance: Design an algorithm for virtual context management when cumulative conversation and tool transcripts exceed model context limits. Detail semantic summarization, AST-aware code compaction, token eviction policies (e.g., Attention-Weighted LRU), and lossless compression of tool outputs.
+
+4. Sandboxed Tool Execution, Security Enclaves, and Safety Verifiers:
+- Execution Sandboxing: Detail the isolation primitives required for untrusted code execution (Linux cgroups v2, seccomp-BPF filters, Firecracker microVMs, or gVisor secure containers). Specify strict limits on CPU cycle quotas, network egress filtering (allowlisted domains), ephemeral filesystem snapshots with copy-on-write (CoW), and memory ceilings.
+- Deterministic Verification Gates: Detail the automated policy enforcement layer (static AST analysis, secret detection, dynamic invariant checks) that verifies code patches and terminal operations before committing mutations to production branches.
+
+Provide clean, modular, production-ready architectural pseudocode and rigorous systems specifications throughout your treatise.
